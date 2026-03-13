@@ -47,7 +47,7 @@ HealthX is a cross-platform mobile application paired with a PHP REST API backen
 | Temperature | MLX90614 | Non-contact body temperature sensor |
 | Blood Pressure | Pressure Sensor | Systolic / diastolic measurement |
 | Weight | HX711 + Load Cell | Weight measurement with tare/calibration |
-| Height | HC-SR04 | Ultrasonic distance sensor for height |
+| Height | TOF400C-VL53L1X | Ultrasonic distance sensor for height |
 
 ### ESP32 HTTP API
 
