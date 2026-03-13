@@ -1,0 +1,7 @@
+MySQL Database Name = healthhccx
+MySQL Username = healthhccx
+Password = HealthXInnovation1;
+Domain = healthhccx.cpedev.site/healthx
+
+MySQL Database Name = u205624883_healthhccx
+MySQL Username = u205624883_healthhccx

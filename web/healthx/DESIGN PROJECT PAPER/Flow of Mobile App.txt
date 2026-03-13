@@ -1,0 +1,211 @@
+┌─────────────────────────────────────┐
+│ [X]  [Icon] BMI Calculator    [?]   │ ← AppBar
+├─────────────────────────────────────┤
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │ 👤 Patient                  │   │
+│  │    Juan Dela Cruz           │   │ ← Patient Name Card
+│  └─────────────────────────────┘   │
+│                                     │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │                             │   │
+│  │   [▶] Start Measurement     │   │ ← Start Button
+│  │                             │   │
+│  └─────────────────────────────┘   │
+└─────────────────────────────────────┘
+
+┌─────────────────────────────────────┐
+│ [X]  [Icon] BMI Calculator    [?]   │
+├─────────────────────────────────────┤
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │ 👤 Patient: Juan Dela Cruz  │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │                             │   │
+│  │      [Scale Icon]           │   │ ← Animated pulsing icon
+│  │         • • •               │   │ ← Loading dots
+│  │                             │   │
+│  │  Connecting to Sensor       │   │
+│  │  Please wait while we       │   │
+│  │  establish connection...    │   │
+│  │                             │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │  [🔄 Reset]  [💾 Save Data] │   │ ← Bottom buttons
+│  └─────────────────────────────┘   │
+└─────────────────────────────────────┘
+
+
+┌─────────────────────────────────────┐
+│ [X]  [Icon] BMI Calculator    [?]   │
+├─────────────────────────────────────┤
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │ 👤 Patient: Juan Dela Cruz  │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │ 🟢 Sensor Connected         │   │
+│  │    Live Reading    [ACTIVE] │   │
+│  ├─────────────────────────────┤   │
+│  │                             │   │
+│  │ Weight                      │   │
+│  │ 65.5 kg            [Scale]  │   │ ← Live weight
+│  │                             │   │
+│  │ [Tare Scale Button]         │   │ ← Tare button HERE
+│  │                             │   │
+│  │ Height                      │   │
+│  │ 170.0 cm          [Height]  │   │ ← Live height
+│  │                             │   │
+│  │ BMI                         │   │
+│  │ 22.7              [BMI Icon]│   │ ← Calculated BMI
+│  │                             │   │
+│  │ ┌───────────────────────┐   │   │
+│  │ │ ✓ BMI Category        │   │   │
+│  │ │   Normal              │   │   │ ← Status (Green/Orange/Red)
+│  │ └───────────────────────┘   │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │  [🔄 Reset]  [💾 Save Data] │   │
+│  └─────────────────────────────┘   │
+└─────────────────────────────────────┘
+
+
+┌─────────────────────────────────────┐
+│ [X]  [Icon] Temperature       [?]   │
+├─────────────────────────────────────┤
+│  ┌─────────────────────────────┐   │
+│  │ 🟢 Sensor Connected         │   │
+│  │    Live Reading    [ACTIVE] │   │
+│  ├─────────────────────────────┤   │
+│  │                             │   │
+│  │ Body Temperature            │   │
+│  │ 36.8 °C       [Temp Icon]   │   │ ← Live temp
+│  │                             │   │
+│  │ ┌───────────────────────┐   │   │
+│  │ │ ✓ Temperature Status  │   │   │
+│  │ │   Normal (Green)      │   │   │
+│  │ └───────────────────────┘   │   │
+│  └─────────────────────────────┘   │
+└─────────────────────────────────────┘
+
+
+┌─────────────────────────────────────┐
+│ [X]  [Icon] Vitals            [?]   │
+├─────────────────────────────────────┤
+│  ┌─────────────────────────────┐   │
+│  │ 🟢 Sensor Connected         │   │
+│  │    Live Reading    [ACTIVE] │   │
+│  ├─────────────────────────────┤   │
+│  │                             │   │
+│  │ Heart Rate                  │   │
+│  │ 75 bpm         [Heart Icon] │   │ ← Live HR
+│  │                             │   │
+│  │ Blood Oxygen (SpO2)         │   │
+│  │ 98 %           [O2 Icon]    │   │ ← Live SpO2
+│  │                             │   │
+│  │ ┌───────────────────────┐   │   │
+│  │ │ ✓ Heart Rate Status   │   │   │
+│  │ │   Normal (Green)      │   │   │
+│  │ └───────────────────────┘   │   │
+│  │ ┌───────────────────────┐   │   │
+│  │ │ ✓ Oxygen Status       │   │   │
+│  │ │   Normal (Green)      │   │   │
+│  │ └───────────────────────┘   │   │
+│  └─────────────────────────────┘   │
+└─────────────────────────────────────┘
+
+
+┌─────────────────────────────────────┐
+│ [X]  [Icon] Blood Pressure    [?]   │
+├─────────────────────────────────────┤
+│  ┌─────────────────────────────┐   │
+│  │ 🟢 Sensor Connected         │   │
+│  │    Live Reading    [ACTIVE] │   │
+│  ├─────────────────────────────┤   │
+│  │                             │   │
+│  │ Systolic Pressure           │   │
+│  │ 120 mmHg       [BP Icon]    │   │ ← Live systolic
+│  │                             │   │
+│  │ Diastolic Pressure          │   │
+│  │ 80 mmHg        [BP Icon]    │   │ ← Live diastolic
+│  │                             │   │
+│  │ ┌───────────────────────┐   │   │
+│  │ │ ✓ Blood Pressure      │   │   │
+│  │ │   Normal (Green)      │   │   │
+│  │ └───────────────────────┘   │   │
+│  └─────────────────────────────┘   │
+└─────────────────────────────────────┘
+
+
+// BMI Categories
+< 18.5  → Blue    (Underweight)
+18.5-25 → Green   (Normal) ✅
+25-30   → Orange  (Overweight)
+> 30    → Red     (Obese)
+
+// Temperature
+< 36.1°C  → Blue    (Low)
+36.1-37.2 → Green   (Normal) ✅
+37.2-38.0 → Orange  (Elevated)
+> 38.0    → Red     (Fever)
+
+// Heart Rate
+< 60      → Blue    (Low)
+60-100    → Green   (Normal) ✅
+100-120   → Orange  (Elevated)
+> 120     → Red     (High)
+
+// SpO2
+≥ 95%     → Green   (Normal) ✅
+90-94%    → Orange  (Low)
+< 90%     → Red     (Critical)
+
+// Blood Pressure
+< 120/80  → Green   (Normal) ✅
+120-130   → Blue    (Elevated)
+130-140   → Orange  (Stage 1)
+≥ 180/120 → Red     (Crisis)
+```
+
+## 🔄 **TARE SCALE BUTTON (BMI Only):**
+```
+┌─────────────────────────────────┐
+│ Weight                          │
+│ 65.5 kg              [Scale]    │
+│                                 │
+│ ┌─────────────────────────────┐ │
+│ │  [🔄] Tare Scale            │ │ ← THIS BUTTON
+│ └─────────────────────────────┘ │
+```
+
+**When you press "Tare Scale":**
+1. ESP32 runs `weightScale.tare(20)`
+2. Takes 20 readings
+3. Sets current weight as ZERO
+4. Shows snackbar: "✅ Scale tared successfully!"
+
+## 📊 **DATA FLOW:**
+```
+User clicks "Start Measurement"
+         ↓
+Shows "Connecting to Sensor..." (1.5 seconds)
+         ↓
+Starts polling ESP32 every 500ms
+         ↓
+Updates live data on screen
+         ↓
+Shows colored status indicators
+         ↓
+User clicks "Save Data"
+         ↓
+Calls onDataSaved(finalData)
+         ↓
+Shows "✅ BMI data saved!" snackbar
+
+

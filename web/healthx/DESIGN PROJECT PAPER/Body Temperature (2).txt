@@ -1,0 +1,34 @@
+Body Temperature
+
+Most GY-906 sensors read 0.5°C to 1.5°C lower than a medical thermometer.
+
+So we need to apply an offset to correct the reading.
+
+Formula;
+
+CalibratedTemp = RawTemp + Offset
+
+Offset = ActualBodyTemp − RawSensorTemp
+
+Used when you test multiple people.
+OffsetAverage = (Σ (Actual_i − Raw_i)) / N
+Σ = sum
+
+i = each measurement
+
+N = number of samples
+
+CalibratedTemp = RawTemp + OffsetAverage
+
+Example;
+Person	Actual Temp	Sensor Temp	Difference
+1	36.4	35.2	+1.2
+2	36.7	35.4	+1.3
+3	36.8	35.3	+1.5
+4	36.5	35.1	+1.4
+
+Average offset:
+
+(1.2 + 1.3 + 1.5 + 1.4) / 4 = 1.35
+
+float calibrationOffset = 1.35;

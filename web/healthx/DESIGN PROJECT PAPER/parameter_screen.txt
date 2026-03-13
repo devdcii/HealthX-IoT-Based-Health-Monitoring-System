@@ -1,0 +1,1293 @@
+import 'package:flutter/material.dart';
+import 'dart:async';
+import 'healthworker_dashboard.dart';
+import 'api_service.dart';
+
+class ParameterMeasurementScreen extends StatefulWidget {
+  final String title;
+  final IconData icon;
+  final Color color;
+  final String paramKey;
+  final String patientName;
+  final Function(Map<String, dynamic>) onDataSaved;
+
+  const ParameterMeasurementScreen({
+    Key? key,
+    required this.title,
+    required this.icon,
+    required this.color,
+    required this.paramKey,
+    required this.patientName,
+    required this.onDataSaved,
+  }) : super(key: key);
+
+  @override
+  State<ParameterMeasurementScreen> createState() =>
+      _ParameterMeasurementScreenState();
+}
+
+class _ParameterMeasurementScreenState
+    extends State<ParameterMeasurementScreen> {
+  bool isStarted = false;
+  bool isLoading = false;
+  bool isSaved = false;
+  bool showInstructions = true;
+  Timer? _sensorTimer;
+  Map<String, dynamic> liveData = {};
+  Map<String, dynamic> finalData = {};
+
+  Map<String, String> parameterImages = {
+    'bmi': 'images/body-mass-index.png',
+    'height': 'images/height.png',
+    'weight': 'images/weight.png',
+    'temperature': 'images/body-temperature.png',
+    'heart_rate': 'images/oxygen-saturation.png',
+    'spo2': 'images/oxygen-saturation.png',
+    'bp': 'images/blood-pressure.png',
+    'vitals': 'images/oxygen-saturation.png',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _showInstructionsDialog();
+    });
+  }
+
+  @override
+  void dispose() {
+    _sensorTimer?.cancel();
+    super.dispose();
+  }
+
+  void _showInstructionsDialog() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (context) => _InstructionsDialog(
+          paramKey: widget.paramKey,
+          title: widget.title,
+          color: widget.color,
+          imagePath: parameterImages[widget.paramKey] ?? 'images/oxygen-saturation.png',
+          onComplete: () {
+            Navigator.pop(context);
+            setState(() => showInstructions = false);
+          },
+        ),
+      ),
+    );
+  }
+
+  void _startMeasurement() async {
+    setState(() {
+      isStarted = true;
+      isLoading = true;
+      isSaved = false;
+      liveData = {};
+      finalData = {};
+    });
+    await _activateSensor();
+    _startRealtimePolling();
+  }
+
+  Future<void> _activateSensor() async {
+    await Future.delayed(Duration(milliseconds: 1500));
+  }
+
+  void _startRealtimePolling() {
+    _sensorTimer = Timer.periodic(Duration(milliseconds: 500), (timer) async {
+      final result = await ApiService.getEsp32HealthData();
+      if (result['success'] != false && mounted) {
+        setState(() {
+          isLoading = false;
+          _updateLiveData(result);
+        });
+      }
+    });
+  }
+
+  void _updateLiveData(Map<String, dynamic> espData) {
+    print('Updating live data for ${widget.paramKey}');
+    print('ESP Data received: $espData');
+
+    switch (widget.paramKey) {
+      case 'bmi':
+        liveData = {
+          'weight': espData['weight']?['value']?.toDouble() ?? 0.0,
+          'height': espData['bmi']?['height']?.toDouble() ?? 170.0,
+          'bmi': espData['bmi']?['value']?.toDouble() ?? 0.0,
+        };
+        print('BMI Live Data: $liveData');
+        break;
+
+      case 'temperature':
+        double temp = espData['temperature']?['value']?.toDouble() ?? 0.0;
+        liveData = {
+          'temperature': temp,
+        };
+        print('Temperature Live Data: $liveData (from ESP: $temp)');
+        break;
+
+      case 'vitals':
+        int hr = espData['heartRate']?['value'] ?? 0;
+        int spo2Val = espData['spo2']?['value'] ?? 0;
+        liveData = {
+          'heart_rate': hr,
+          'spo2': spo2Val,
+        };
+        print('Vitals Live Data: $liveData');
+        break;
+
+      case 'bp':
+        int sys = espData['bloodPressure']?['systolic'] ?? 0;
+        int dia = espData['bloodPressure']?['diastolic'] ?? 0;
+        liveData = {
+          'systolic': sys,
+          'diastolic': dia,
+        };
+        print('BP Live Data: $liveData');
+        break;
+    }
+  }
+
+  void _resetMeasurement() {
+    setState(() {
+      isStarted = false;
+      isLoading = false;
+      isSaved = false;
+      liveData = {};
+      finalData = {};
+    });
+    _sensorTimer?.cancel();
+  }
+
+  Future<void> _tareScale() async {
+    try {
+      await ApiService.tareWeightScale();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.check_circle_outline, color: AppColors.white),
+                SizedBox(width: 12),
+                Text('Scale tared successfully!'),
+              ],
+            ),
+            backgroundColor: AppColors.success,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.error_outline, color: AppColors.white),
+                SizedBox(width: 12),
+                Text('Failed to tare scale: $e'),
+              ],
+            ),
+            backgroundColor: AppColors.error,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+    }
+  }
+
+  void _saveData() {
+    if (liveData.isEmpty) return;
+    setState(() {
+      finalData = Map.from(liveData);
+      isSaved = true;
+    });
+    widget.onDataSaved(finalData);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Icon(Icons.check_circle_outline, color: AppColors.white),
+              SizedBox(width: 12),
+              Text('${widget.title} data saved!'),
+            ],
+          ),
+          backgroundColor: AppColors.success,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    }
+  }
+
+  String _getBMICategory(double bmi) {
+    if (bmi < 18.5) return 'Underweight';
+    if (bmi < 25) return 'Normal';
+    if (bmi < 30) return 'Overweight';
+    return 'Obese';
+  }
+
+  Color _getBMICategoryColor(double bmi) {
+    if (bmi < 18.5) return Color(0xFF3B82F6);
+    if (bmi < 25) return AppColors.success;
+    if (bmi < 30) return Color(0xFFF59E0B);
+    return AppColors.error;
+  }
+
+  String _getTemperatureStatus(double temp) {
+    if (temp < 36.1) return 'Low';
+    if (temp <= 37.2) return 'Normal';
+    if (temp <= 38.0) return 'Elevated';
+    return 'Fever';
+  }
+
+  Color _getTemperatureColor(double temp) {
+    if (temp < 36.1) return Color(0xFF3B82F6);
+    if (temp <= 37.2) return AppColors.success;
+    if (temp <= 38.0) return Color(0xFFF59E0B);
+    return AppColors.error;
+  }
+
+  String _getHeartRateStatus(int hr) {
+    if (hr < 60) return 'Low';
+    if (hr <= 100) return 'Normal';
+    if (hr <= 120) return 'Elevated';
+    return 'High';
+  }
+
+  Color _getHeartRateColor(int hr) {
+    if (hr < 60) return Color(0xFF3B82F6);
+    if (hr <= 100) return AppColors.success;
+    if (hr <= 120) return Color(0xFFF59E0B);
+    return AppColors.error;
+  }
+
+  String _getSpO2Status(int spo2) {
+    if (spo2 >= 95) return 'Normal';
+    if (spo2 >= 90) return 'Low';
+    return 'Critical';
+  }
+
+  Color _getSpO2Color(int spo2) {
+    if (spo2 >= 95) return AppColors.success;
+    if (spo2 >= 90) return Color(0xFFF59E0B);
+    return AppColors.error;
+  }
+
+  String _getBloodPressureStatus(int systolic, int diastolic) {
+    if (systolic < 120 && diastolic < 80) return 'Normal';
+    if (systolic < 130 && diastolic < 80) return 'Elevated';
+    if (systolic < 140 || diastolic < 90) return 'Stage 1 Hypertension';
+    if (systolic < 180 || diastolic < 120) return 'Stage 2 Hypertension';
+    return 'Hypertensive Crisis';
+  }
+
+  Color _getBloodPressureColor(int systolic, int diastolic) {
+    if (systolic < 120 && diastolic < 80) return AppColors.success;
+    if (systolic < 130 && diastolic < 80) return Color(0xFF3B82F6);
+    if (systolic < 140 || diastolic < 90) return Color(0xFFF59E0B);
+    return AppColors.error;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      appBar: AppBar(
+        backgroundColor: Color(0xFF1848A0),
+        leading: IconButton(
+          icon: Icon(Icons.close_rounded, color: AppColors.white, size: 28),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Row(
+          children: [
+            Container(
+              padding: EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.white.withOpacity(0.2),
+                shape: BoxShape.circle,
+              ),
+              child: Image.asset(
+                parameterImages[widget.paramKey] ?? 'images/oxygen-saturation.png',
+                width: 24,
+                height: 24,
+                errorBuilder: (context, error, stackTrace) =>
+                    Icon(widget.icon, color: AppColors.white, size: 24),
+              ),
+            ),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                widget.title,
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.help_outline, color: AppColors.white),
+            tooltip: 'View Instructions',
+            onPressed: _showInstructionsDialog,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: SingleChildScrollView(
+              padding: EdgeInsets.all(24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [Color(0xFF1848A0), Color(0xFF2563C9)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Color(0xFF1848A0).withOpacity(0.3),
+                          blurRadius: 12,
+                          offset: Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.white.withOpacity(0.2),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(Icons.person, color: AppColors.white, size: 24),
+                        ),
+                        SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Patient',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: AppColors.white.withOpacity(0.8),
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              SizedBox(height: 2),
+                              Text(
+                                widget.patientName,
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                  color: AppColors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(height: 24),
+                  if (isStarted) _buildMeasurementDisplay(),
+                ],
+              ),
+            ),
+          ),
+          _buildBottomActions(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMeasurementDisplay() {
+    if (isLoading) {
+      return Container(
+        padding: EdgeInsets.all(40),
+        decoration: BoxDecoration(
+          color: AppColors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Color(0xFF1848A0).withOpacity(0.3), width: 2),
+        ),
+        child: Column(
+          children: [
+            TweenAnimationBuilder(
+              tween: Tween<double>(begin: 0, end: 1),
+              duration: Duration(seconds: 2),
+              builder: (context, double value, child) => Transform.scale(
+                scale: 0.8 + (value * 0.2),
+                child: Container(
+                  padding: EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: Color(0xFF1848A0).withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Image.asset(
+                    parameterImages[widget.paramKey] ?? 'images/oxygen-saturation.png',
+                    width: 80,
+                    height: 80,
+                    errorBuilder: (context, error, stackTrace) =>
+                        Icon(Icons.sensors, size: 80, color: Color(0xFF1848A0)),
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(
+                3,
+                    (index) => AnimatedContainer(
+                  duration: Duration(milliseconds: 300),
+                  margin: EdgeInsets.symmetric(horizontal: 4),
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    color: Color(0xFF1848A0).withOpacity(0.5 + (index * 0.2)),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(height: 20),
+            Text(
+              'Connecting to Sensor',
+              style: TextStyle(
+                fontSize: 18,
+                color: Color(0xFF1848A0),
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Please wait while we establish connection...',
+              style: TextStyle(
+                fontSize: 14,
+                color: AppColors.textLight,
+                fontWeight: FontWeight.w500,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      padding: EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppColors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Color(0xFF1848A0), width: 2),
+        boxShadow: [
+          BoxShadow(
+            color: Color(0xFF1848A0).withOpacity(0.2),
+            blurRadius: 15,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.success.withOpacity(0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.sensors, color: AppColors.success, size: 28),
+              ),
+              SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Sensor Connected',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.success,
+                      ),
+                    ),
+                    Text(
+                      'Live Reading',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.textDark,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppColors.success,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.success.withOpacity(0.3),
+                      blurRadius: 8,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: AppColors.white,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    SizedBox(width: 8),
+                    Text(
+                      'ACTIVE',
+                      style: TextStyle(
+                        color: AppColors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: 20),
+          if (widget.paramKey == 'bmi') ..._buildBMIDisplay(),
+          if (widget.paramKey == 'temperature') ..._buildTemperatureDisplay(),
+          if (widget.paramKey == 'vitals') ..._buildVitalsDisplay(),
+          if (widget.paramKey == 'bp') ..._buildBPDisplay(),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildBMIDisplay() {
+    double weight = liveData['weight'] ?? 0.0;
+    double height = liveData['height'] ?? 0.0;
+    double bmi = liveData['bmi'] ?? 0.0;
+
+    return [
+      _buildDataRow('Weight', weight.toStringAsFixed(1), 'kg', 'images/weight.png'),
+      Container(
+        margin: EdgeInsets.only(bottom: 16),
+        child: SizedBox(
+          width: double.infinity,
+          height: 50,
+          child: OutlinedButton(
+            onPressed: _tareScale,
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(color: Color(0xFF1848A0), width: 2),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.refresh, color: Color(0xFF1848A0), size: 20),
+                SizedBox(width: 8),
+                Text(
+                  'Tare Scale',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1848A0),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      _buildDataRow('Height', height.toStringAsFixed(1), 'cm', 'images/height.png'),
+      _buildDataRow('BMI', bmi.toStringAsFixed(1), '', 'images/body-mass-index.png'),
+      if (bmi > 0) ...[
+        SizedBox(height: 8),
+        _buildStatusIndicator(
+          'BMI Category',
+          _getBMICategory(bmi),
+          _getBMICategoryColor(bmi),
+          Icons.analytics,
+        ),
+      ],
+    ];
+  }
+
+  List<Widget> _buildTemperatureDisplay() {
+    double temp = liveData['temperature'] ?? 0.0;
+
+    return [
+      _buildDataRow('Body Temperature', temp.toStringAsFixed(1), '°C', 'images/body-temperature.png'),
+      if (temp > 0) ...[
+        SizedBox(height: 8),
+        _buildStatusIndicator(
+          'Temperature Status',
+          _getTemperatureStatus(temp),
+          _getTemperatureColor(temp),
+          Icons.thermostat,
+        ),
+      ],
+    ];
+  }
+
+  List<Widget> _buildVitalsDisplay() {
+    int hr = liveData['heart_rate'] ?? 0;
+    int spo2 = liveData['spo2'] ?? 0;
+
+    return [
+      _buildDataRow('Heart Rate', hr.toString(), 'bpm', 'images/oxygen-saturation.png'),
+      _buildDataRow('Blood Oxygen (SpO2)', spo2.toString(), '%', 'images/oxygen-saturation.png'),
+      if (hr > 0 || spo2 > 0) ...[
+        SizedBox(height: 8),
+        if (hr > 0)
+          Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: _buildStatusIndicator(
+              'Heart Rate Status',
+              _getHeartRateStatus(hr),
+              _getHeartRateColor(hr),
+              Icons.favorite,
+            ),
+          ),
+        if (spo2 > 0)
+          _buildStatusIndicator(
+            'Oxygen Status',
+            _getSpO2Status(spo2),
+            _getSpO2Color(spo2),
+            Icons.air,
+          ),
+      ],
+    ];
+  }
+
+  List<Widget> _buildBPDisplay() {
+    int systolic = liveData['systolic'] ?? 0;
+    int diastolic = liveData['diastolic'] ?? 0;
+
+    return [
+      _buildDataRow('Systolic Pressure', systolic.toString(), 'mmHg', 'images/blood-pressure.png'),
+      _buildDataRow('Diastolic Pressure', diastolic.toString(), 'mmHg', 'images/blood-pressure.png'),
+      if (systolic > 0 && diastolic > 0) ...[
+        SizedBox(height: 8),
+        _buildStatusIndicator(
+          'Blood Pressure Status',
+          _getBloodPressureStatus(systolic, diastolic),
+          _getBloodPressureColor(systolic, diastolic),
+          Icons.monitor_heart,
+        ),
+      ],
+    ];
+  }
+
+  Widget _buildDataRow(String label, String value, String unit, String imagePath) {
+    return Container(
+      margin: EdgeInsets.only(bottom: 16),
+      padding: EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            AppColors.background,
+            Color(0xFF1848A0).withOpacity(0.05),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Color(0xFF1848A0).withOpacity(0.3), width: 2),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: AppColors.textLight,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      value,
+                      style: TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF1848A0),
+                      ),
+                    ),
+                    if (unit.isNotEmpty) ...[
+                      SizedBox(width: 8),
+                      Padding(
+                        padding: EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          unit,
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: AppColors.textLight,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Color(0xFF1848A0).withOpacity(0.1),
+              shape: BoxShape.circle,
+            ),
+            child: Image.asset(
+              imagePath,
+              width: 28,
+              height: 28,
+              errorBuilder: (context, error, stackTrace) =>
+                  Icon(Icons.healing, color: Color(0xFF1848A0), size: 28),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatusIndicator(String label, String status, Color color, IconData icon) {
+    return Container(
+      padding: EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color, width: 2),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 24),
+          SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textLight,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  status,
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: color,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBottomActions() {
+    return Container(
+      padding: EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppColors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: Offset(0, -5),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!isStarted)
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: _startMeasurement,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Color(0xFF1848A0),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    elevation: 4,
+                    shadowColor: Color(0xFF1848A0).withOpacity(0.4),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.play_arrow, color: AppColors.white, size: 28),
+                      SizedBox(width: 12),
+                      Text(
+                        'Start Measurement',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else
+              Row(
+                children: [
+                  Expanded(
+                    child: SizedBox(
+                      height: 56,
+                      child: OutlinedButton(
+                        onPressed: _resetMeasurement,
+                        style: OutlinedButton.styleFrom(
+                          side: BorderSide(color: Color(0xFF1848A0), width: 2),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.refresh, color: Color(0xFF1848A0), size: 24),
+                            SizedBox(width: 8),
+                            Text(
+                              'Reset',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1848A0),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    flex: 2,
+                    child: SizedBox(
+                      height: 56,
+                      child: ElevatedButton(
+                        onPressed: liveData.isNotEmpty && !isSaved ? _saveData : null,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: isSaved ? AppColors.textLight : AppColors.success,
+                          disabledBackgroundColor: AppColors.textLight,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          elevation: isSaved ? 0 : 4,
+                          shadowColor: AppColors.success.withOpacity(0.4),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              isSaved ? Icons.check_circle : Icons.save,
+                              color: AppColors.white,
+                              size: 24,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              isSaved ? 'Saved' : 'Save Data',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: AppColors.white,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _InstructionsDialog extends StatefulWidget {
+  final String paramKey;
+  final String title;
+  final Color color;
+  final String imagePath;
+  final VoidCallback onComplete;
+
+  const _InstructionsDialog({
+    Key? key,
+    required this.paramKey,
+    required this.title,
+    required this.color,
+    required this.imagePath,
+    required this.onComplete,
+  }) : super(key: key);
+
+  @override
+  State<_InstructionsDialog> createState() => _InstructionsDialogState();
+}
+
+class _InstructionsDialogState extends State<_InstructionsDialog> {
+  int currentStep = 0;
+  late List<InstructionStep> steps;
+
+  @override
+  void initState() {
+    super.initState();
+    steps = _getInstructions(widget.paramKey);
+  }
+
+  List<InstructionStep> _getInstructions(String paramKey) {
+    Map<String, List<InstructionStep>> instructionsMap = {
+      'bmi': [
+        InstructionStep(
+          title: 'Prepare the Scale',
+          description: 'Ensure the scale is placed on a flat, stable surface.',
+          icon: Icons.info_outline,
+          color: Color(0xFF1848A0),
+        ),
+        InstructionStep(
+          title: 'Remove Heavy Items',
+          description: 'Ask the patient to remove shoes and heavy clothing for accurate weight measurement.',
+          icon: Icons.accessibility_new,
+          color: Color(0xFF10B981),
+        ),
+        InstructionStep(
+          title: 'Position Correctly',
+          description: 'Patient should stand straight under the height sensor with feet together.',
+          icon: Icons.straighten,
+          color: Color(0xFFF59E0B),
+        ),
+        InstructionStep(
+          title: 'Wait for Reading',
+          description: 'Keep body still until you get a stable reading on the display.',
+          icon: Icons.timer,
+          color: Color(0xFF8B5CF6),
+        ),
+      ],
+      'temperature': [
+        InstructionStep(
+          title: 'Clean the Sensor',
+          description: 'Wipe the temperature sensor with a clean, dry cloth before use.',
+          icon: Icons.cleaning_services,
+          color: Color(0xFF1848A0),
+        ),
+        InstructionStep(
+          title: 'Position Sensor',
+          description: 'Hold the sensor 2-3 cm away from the center of the patient\'s forehead.',
+          icon: Icons.location_on,
+          color: Color(0xFF10B981),
+        ),
+        InstructionStep(
+          title: 'Keep Steady',
+          description: 'Hold the sensor steady and press the measurement button.',
+          icon: Icons.pan_tool,
+          color: Color(0xFFF59E0B),
+        ),
+        InstructionStep(
+          title: 'Wait for Beep',
+          description: 'Wait for the device to beep indicating measurement is complete.',
+          icon: Icons.notifications_active,
+          color: Color(0xFF8B5CF6),
+        ),
+      ],
+      'vitals': [
+        InstructionStep(
+          title: 'Patient Preparation',
+          description: 'Ask the patient to sit comfortably and relax for a few minutes.',
+          icon: Icons.event_seat,
+          color: Color(0xFF1848A0),
+        ),
+        InstructionStep(
+          title: 'Insert Finger',
+          description: 'Have the patient place their index finger firmly into the pulse oximeter.',
+          icon: Icons.touch_app,
+          color: Color(0xFF10B981),
+        ),
+        InstructionStep(
+          title: 'Stay Still',
+          description: 'Patient should keep their finger still and breathe normally during measurement.',
+          icon: Icons.self_improvement,
+          color: Color(0xFFF59E0B),
+        ),
+        InstructionStep(
+          title: 'Wait for Results',
+          description: 'The device will take about 10-15 seconds to display heart rate and SpO2.',
+          icon: Icons.favorite,
+          color: Color(0xFFEF4444),
+        ),
+      ],
+      'bp': [
+        InstructionStep(
+          title: 'Rest Period',
+          description: 'Have the patient sit quietly and relax for 5 minutes before measurement.',
+          icon: Icons.timer,
+          color: Color(0xFF1848A0),
+        ),
+        InstructionStep(
+          title: 'Apply Cuff',
+          description: 'Wrap the cuff snugly around the patient\'s wrist, about 1 cm from the hand.',
+          icon: Icons.watch,
+          color: Color(0xFF10B981),
+        ),
+        InstructionStep(
+          title: 'Position Wrist',
+          description: 'Keep the wrist at heart level, palm facing up.',
+          icon: Icons.favorite,
+          color: Color(0xFFF59E0B),
+        ),
+        InstructionStep(
+          title: 'Start Measurement',
+          description: 'Press start and remain still during inflation and deflation of the cuff.',
+          icon: Icons.play_circle,
+          color: Color(0xFF8B5CF6),
+        ),
+      ],
+    };
+    return instructionsMap[paramKey] ?? [];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (steps.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        widget.onComplete();
+      });
+      return SizedBox.shrink();
+    }
+
+    return Scaffold(
+      backgroundColor: AppColors.white,
+      appBar: AppBar(
+        backgroundColor: AppColors.white,
+        elevation: 0,
+        leading: IconButton(
+          icon: Icon(Icons.close, color: AppColors.textDark),
+          onPressed: () => widget.onComplete(),
+        ),
+        title: Row(
+          children: [
+            Image.asset(
+              widget.imagePath,
+              width: 32,
+              height: 32,
+              errorBuilder: (context, error, stackTrace) {
+                return Icon(Icons.healing, color: Color(0xFF1848A0), size: 32);
+              },
+            ),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                widget.title,
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.textDark,
+                ),
+              ),
+            ),
+          ],
+        ),
+        centerTitle: false,
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: EdgeInsets.all(20),
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List.generate(
+                    steps.length,
+                        (index) => AnimatedContainer(
+                      duration: Duration(milliseconds: 300),
+                      margin: EdgeInsets.symmetric(horizontal: 4),
+                      height: 8,
+                      width: currentStep == index ? 32 : 8,
+                      decoration: BoxDecoration(
+                        color: currentStep == index
+                            ? Color(0xFF1848A0)
+                            : Color(0xFF1848A0).withOpacity(0.3),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ),
+                ),
+                SizedBox(height: 12),
+                Text(
+                  'Step ${currentStep + 1} of ${steps.length}',
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: AppColors.textLight,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 32),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 120,
+                    height: 120,
+                    decoration: BoxDecoration(
+                      color: steps[currentStep].color.withOpacity(0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      steps[currentStep].icon,
+                      size: 60,
+                      color: steps[currentStep].color,
+                    ),
+                  ),
+                  SizedBox(height: 40),
+                  Text(
+                    steps[currentStep].title,
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textDark,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  SizedBox(height: 20),
+                  Text(
+                    steps[currentStep].description,
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: AppColors.textLight,
+                      height: 1.6,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: EdgeInsets.all(20),
+            child: Row(
+              children: [
+                if (currentStep > 0)
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () {
+                        setState(() {
+                          currentStep--;
+                        });
+                      },
+                      style: OutlinedButton.styleFrom(
+                        padding: EdgeInsets.symmetric(vertical: 16),
+                        side: BorderSide(color: Color(0xFF1848A0), width: 2),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(15),
+                        ),
+                      ),
+                      child: Text(
+                        'Previous',
+                        style: TextStyle(
+                          color: Color(0xFF1848A0),
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (currentStep > 0) SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () {
+                      if (currentStep < steps.length - 1) {
+                        setState(() {
+                          currentStep++;
+                        });
+                      } else {
+                        widget.onComplete();
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Color(0xFF1848A0),
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                      elevation: 2,
+                    ),
+                    child: Text(
+                      currentStep < steps.length - 1 ? 'Next' : 'Start Measurement',
+                      style: TextStyle(
+                        color: AppColors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
+}
+
+class InstructionStep {
+  final String title;
+  final String description;
+  final IconData icon;
+  final Color color;
+
+  InstructionStep({
+    required this.title,
+    required this.description,
+    required this.icon,
+    required this.color,
+  });
+}

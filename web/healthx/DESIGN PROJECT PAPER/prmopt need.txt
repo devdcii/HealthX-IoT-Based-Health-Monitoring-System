@@ -1,0 +1,1 @@
+can you check the body temp code in tehe arduinoesp32 and mobile app why it doesnt display the value or readings in my flutter and then why my max30102 is humihina ung ilaw sa sensor is just in the code? or hindi cause when they try to serial montiro only is sobrang mailaw siya

@@ -1,0 +1,43 @@
+BMI Value	Category
+Below 18.5	Underweight
+18.5 – 24.9	Normal (Healthy Weight)
+25.0 – 29.9	Overweight
+30.0 – 34.9	Obesity Class I
+35.0 – 39.9	Obesity Class II
+40.0 and above	Obesity Class III (Severe / Morbid Obesity)
+
+🔽 Below Normal
+Temperature	Meaning
+35.5 – 36.4 °C	Slightly Low
+Below 35.0 °C	Hypothermia (Medical Concern)
+🔼 Above Normal
+Temperature	Meaning
+37.6 – 38.0 °C	Low-grade Fever
+38.1 – 39.0 °C	Fever
+Above 39.0 °C	High Fever (Seek Medical Attention)
+
+❤️ Heart Rate (Resting)
+Beats per Minute (BPM)	Meaning
+60 – 100 BPM	Normal
+50 – 59 BPM	Low (Can be Normal for Athletes)
+Below 50 BPM	Bradycardia (Low Heart Rate)
+101 – 120 BPM	Elevated
+Above 120 BPM	Tachycardia (High Heart Rate)
+
+🫁 SpO₂ (Oxygen Saturation)
+SpO₂ %	Meaning
+95 – 100%	Normal
+93 – 94%	Slightly Low (Monitor)
+90 – 92%	Low (Seek Medical Advice)
+Below 90%	Hypoxemia (Medical Emergency)
+
+🩸 Blood Pressure Categories
+
+(Systolic / Diastolic in mmHg)
+
+Category	Systolic	Diastolic
+Normal	Below 120	Below 80
+Elevated	120 – 129	Below 80
+Hypertension – Stage 1	130 – 139	80 – 89
+Hypertension – Stage 2	140 or higher	90 or higher
+Hypertensive Crisis	Over 180	Over 120

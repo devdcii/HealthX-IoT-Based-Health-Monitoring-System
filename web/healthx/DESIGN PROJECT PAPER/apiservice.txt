@@ -1,0 +1,303 @@
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'api_config.dart';
+
+class ApiService {
+  // ===== AUTHENTICATION =====
+
+  static Future<Map<String, dynamic>> login(String email, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse(ApiConfig.authEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'action': 'login',
+          'email': email,
+          'password': password,
+        }),
+      );
+
+      return jsonDecode(response.body);
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> signup(
+      String name, String email, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse(ApiConfig.authEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'action': 'signup',
+          'name': name,
+          'email': email,
+          'password': password,
+        }),
+      );
+
+      return jsonDecode(response.body);
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  // ===== PATIENT MANAGEMENT =====
+
+  static Future<Map<String, dynamic>> getPatients() async {
+    try {
+      final response = await http.get(
+        Uri.parse(ApiConfig.getPatientsEndpoint),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Failed to fetch patients'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> deletePatient(dynamic patientId) async {
+    try {
+      int id = patientId is String ? int.parse(patientId) : patientId;
+
+      final response = await http.post(
+        Uri.parse(ApiConfig.deletePatientEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'patient_id': id}),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Server error: ${response.statusCode}'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  // ===== HEALTH READINGS =====
+
+  static Future<Map<String, dynamic>> getReadings(String userEmail) async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.getReadingsEndpoint}?user_email=$userEmail'),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Failed to fetch readings'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> saveReading(
+      Map<String, dynamic> readingData) async {
+    try {
+      final response = await http.post(
+        Uri.parse(ApiConfig.saveReadingEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(readingData),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Failed to save reading'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> deleteReading(dynamic readingId) async {
+    try {
+      int id = readingId is String ? int.parse(readingId) : readingId;
+
+      final response = await http.post(
+        Uri.parse(ApiConfig.deleteReadingEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'reading_id': id}),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Failed to delete reading'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> updateReading(
+      dynamic readingId, Map<String, dynamic> readingData) async {
+    try {
+      int id = readingId is String ? int.parse(readingId) : readingId;
+
+      final response = await http.post(
+        Uri.parse(ApiConfig.updateReadingEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'reading_id': id,
+          'bmi': readingData['bmi'],
+          'heart_rate': readingData['heart_rate'],
+          'spo2': readingData['spo2'],
+          'temperature': readingData['temperature'],
+          'systolic': readingData['systolic'],
+          'diastolic': readingData['diastolic'],
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Failed to update reading'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  // ===== ESP32 SENSOR DATA =====
+
+  /// Get all health data from ESP32 (combined endpoint)
+  static Future<Map<String, dynamic>> getEsp32HealthData() async {
+    try {
+      final response = await http.get(
+        Uri.parse(ApiConfig.esp32HealthEndpoint),
+      ).timeout(Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return {'success': true, ...data};
+      }
+      return {'success': false, 'message': 'Failed to fetch ESP32 data'};
+    } catch (e) {
+      return {'success': false, 'message': 'ESP32 connection error: $e'};
+    }
+  }
+
+  /// Get individual sensor readings
+  static Future<Map<String, dynamic>> getWeight() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/weight'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getHeight() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/height'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getHeartRate() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/heartrate'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getSpO2() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/spo2'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getTemperature() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/temperature'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getBloodPressure() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/bloodpressure'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  /// Tare the weight scale (reset to zero)
+  static Future<Map<String, dynamic>> tareWeightScale() async {
+    try {
+      final response = await http.post(
+        Uri.parse('${ApiConfig.esp32Url}/tare'),
+        headers: {'Content-Type': 'application/json'},
+      ).timeout(Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return {
+          'success': true,
+          'message': data['message'] ?? 'Scale tared successfully',
+          'data': data,
+        };
+      }
+      return {
+        'success': false,
+        'message': 'Failed to tare scale',
+        'error': 'Status code: ${response.statusCode}',
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'message': 'Error connecting to scale',
+        'error': e.toString(),
+      };
+    }
+  }
+}

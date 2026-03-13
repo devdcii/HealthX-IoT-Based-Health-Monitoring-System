@@ -1,0 +1,28 @@
+Project Requirements in HealthX
+
+Web Application Dashboard for real time monitoring
+Mobile Application for user and healthcare facilities
+Hardware and Chasis
+Calibration of the sensors for accuracy
+
+Mobile Application
+User
+- to be implement...
+
+Healthcare Facilities
+- to be implement...
+
+Website Application
+
+Website
+- fixing the link and information that needed
+- modify if they have suggestions;
+
+Dashboard
+- to be implement...
+
+Hardware Chasi
+- to be implement...
+
+Calibration of the sensors for accuracy
+- to be implement...

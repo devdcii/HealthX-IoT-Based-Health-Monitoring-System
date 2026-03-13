@@ -1,0 +1,188 @@
+#include <Wire.h>
+#include "MAX30105.h"
+#include "spo2_algorithm.h"
+#include "heartRate.h"
+
+MAX30105 particleSensor;
+
+#define MAX_BRIGHTNESS 255
+
+// I2C Pins
+#define I2C_SDA 21
+#define I2C_SCL 22
+
+uint32_t irBuffer[100]; //infrared LED sensor data
+uint32_t redBuffer[100];  //red LED sensor data
+ 
+#define REPORTING_PERIOD_MS 1000 // frequency of updates to serial monitor in ms
+ 
+uint32_t tsLastReport = 0;  //stores the time the last update was sent
+
+int32_t bufferLength; //data length
+int32_t spo2; //SPO2 value
+int8_t validSPO2; //indicator to show if the SPO2 calculation is valid
+int32_t heartRate; //heart rate value calculated as per Maxim's algorithm
+int8_t validHeartRate; //indicator to show if the heart rate calculation is valid
+
+byte pulseLED = 2; //onboard led on esp32  blinks at heart rate
+
+long lastBeat = 0; //Time at which the last beat occurred
+
+float beatsPerMinute; //stores the BPM as per custom algorithm
+int beatAvg = 0; //stores the average BPM
+float ledBlinkFreq; //stores the frequency to blink the pulseLED
+
+ 
+void setup()
+{ 
+  // Setup PWM for pulse LED (ESP32 Core 3.x compatible)
+  ledcAttach(pulseLED, 0, 8); // Pin, Initial Frequency (0Hz), Resolution (8 bits)
+  ledcWrite(pulseLED, 255); //set PWM duty cycle to 255
+  
+  Serial.begin(115200);
+  Serial.println("\n\n=== MAX30105 Pulse Oximeter - Live Readings ===");
+  Serial.println("Initializing I2C on SDA=21, SCL=22...");
+  
+  // Initialize I2C with custom pins
+  Wire.begin(I2C_SDA, I2C_SCL);
+  
+  Serial.println("Initializing Pulse Oximeter...");
+  
+  // Initialize sensor
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) //Use default I2C port, 400kHz speed
+  {
+    Serial.println(F("MAX30105 was not found. Please check wiring/power."));
+    while (1);
+  }
+
+  Serial.println("Sensor initialized successfully!");
+
+  /*The following parameters should be tuned to get the best readings for IR and RED LED. 
+   *The perfect values varies depending on your power consumption required, accuracy, ambient light, sensor mounting, etc. 
+   *Refer Maxim App Notes to understand how to change these values
+   */
+  byte ledBrightness = 50; //Options: 0=Off to 255=50mA
+  byte sampleAverage = 1; //Options: 1, 2, 4, 8, 16, 32
+  byte ledMode = 2; //Options: 1 = Red only, 2 = Red + IR, 3 = Red + IR + Green
+  byte sampleRate = 100; //Options: 50, 100, 200, 400, 800, 1000, 1600, 3200
+  int pulseWidth = 69; //Options: 69, 118, 215, 411
+  int adcRange = 4096; //Options: 2048, 4096, 8192, 16384
+  
+  particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange); //Configure sensor with these settings
+  
+  Serial.println("\n--- Place your finger on the sensor ---");
+  Serial.println("Collecting initial samples...\n");
+}
+ 
+void loop()
+{
+  bufferLength = 100; //buffer length of 100 stores 4 seconds of samples running at 25sps
+  
+  //read the first 100 samples, and determine the signal range
+  for (byte i = 0 ; i < bufferLength ; i++)
+  {
+    while (particleSensor.available() == false) //do we have new data?
+      particleSensor.check(); //Check the sensor for new data
+  
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i] = particleSensor.getIR();
+    particleSensor.nextSample(); //We're finished with this sample so move to next sample
+  
+    // Show progress during initial collection
+    if(i % 10 == 0) {
+      Serial.print(".");
+    }
+  }
+  
+  Serial.println("\nInitial samples collected!");
+  Serial.println("Starting continuous monitoring...\n");
+  
+  //calculate heart rate and SpO2 after first 100 samples (first 4 seconds of samples)
+  maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+  
+  //Continuously taking samples from MAX30102.  Heart rate and SpO2 are calculated every 1 second
+  while (1)
+  {
+    //dumping the first 25 sets of samples in the memory and shift the last 75 sets of samples to the top
+    for (byte i = 25; i < 100; i++)
+    {
+      redBuffer[i - 25] = redBuffer[i];
+      irBuffer[i - 25] = irBuffer[i];
+    }
+  
+    //take 25 sets of samples before calculating the heart rate.
+    for (byte i = 75; i < 100; i++)
+    {
+      while (particleSensor.available() == false) //do we have new data?
+        particleSensor.check(); //Check the sensor for new data
+    
+      redBuffer[i] = particleSensor.getRed();
+      irBuffer[i] = particleSensor.getIR();
+      particleSensor.nextSample(); //We're finished with this sample so move to next sample
+
+      long irValue = irBuffer[i];
+
+      //Calculate BPM independent of Maxim Algorithm
+      if (checkForBeat(irValue) == true)
+      {
+        //We sensed a beat!
+        long delta = millis() - lastBeat;
+        lastBeat = millis();
+      
+        beatsPerMinute = 60 / (delta / 1000.0);
+        beatAvg = (beatAvg + beatsPerMinute) / 2;
+
+        if(beatAvg != 0)
+          ledBlinkFreq = (float)(60.0 / beatAvg);
+        else
+          ledBlinkFreq = 0;
+        ledcWriteTone(pulseLED, ledBlinkFreq);
+      }
+      
+      if(millis() - lastBeat > 10000)
+      {
+        beatsPerMinute = 0;
+        beatAvg = (beatAvg + beatsPerMinute) / 2;
+        
+        if(beatAvg != 0)
+          ledBlinkFreq = (float)(60.0 / beatAvg);
+        else
+          ledBlinkFreq = 0;
+        ledcWriteTone(pulseLED, ledBlinkFreq);
+      }
+    }
+  
+    //After gathering 25 new samples recalculate HR and SP02
+    maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+
+    // Display Data to Serial Monitor at regular intervals
+    if (millis() - tsLastReport > REPORTING_PERIOD_MS)
+    { 
+      Serial.println("=====================================");
+      
+      // Heart Rate - Live Reading
+      Serial.print("Heart Rate (BPM): ");
+      Serial.print(beatAvg);
+      Serial.print(" | Valid: ");
+      Serial.println(validHeartRate ? "YES" : "NO");
+      
+      // SpO2 - Live Reading
+      Serial.print("SpO2 (%): ");
+      Serial.print(spo2);
+      Serial.print(" | Valid: ");
+      Serial.println(validSPO2 ? "YES" : "NO");
+      
+      Serial.print("IR Value: ");
+      Serial.println(irBuffer[99]);
+      
+      // Finger detection
+      if(irBuffer[99] < 50000) {
+        Serial.println("⚠ WARNING: No finger detected or poor contact!");
+      }
+      
+      Serial.println("=====================================\n");
+    
+      tsLastReport = millis();
+    }
+  }
+}

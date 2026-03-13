@@ -1,0 +1,2332 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include "HX711.h"
+#include "MAX30105.h"
+#include "heartRate.h"
+#include "spo2_algorithm.h"
+#include <Adafruit_MLX90614.h>
+#include <VL53L1X.h>
+
+// ===== PIN DEFINITIONS =====
+const int WEIGHT_DOUT_PIN = 15;
+const int WEIGHT_SCK_PIN = 5;
+const int BP_HX_DOUT_PIN = 19;
+const int BP_HX_SCK_PIN = 18;
+const int PUMP_PIN = 12;
+#define I2C_SDA_PIN 21
+#define I2C_SCL_PIN 22
+
+// ===== WiFi CREDENTIALS =====
+const char* ssid = "AES-256";
+const char* password = "106277080026"; 
+
+// ===== SENSOR OBJECTS =====
+HX711 weightScale;
+HX711 bpScale;
+MAX30105 particleSensor;
+Adafruit_MLX90614 mlx;
+VL53L1X heightSensor;
+WebServer server(80);
+
+// ===== SENSOR DATA VARIABLES =====
+float current_weight = 0.0;
+float current_height_cm = 0.0;
+float height_cm = 0.0;
+float bmi = 0.0;
+float weight_calibration_factor = 27.4;
+float sensor_mount_height_cm = 200.0;
+
+// Heart Rate & SpO2 - LIVE READINGS ONLY
+const byte RATE_SIZE = 10;
+byte rates[RATE_SIZE];
+byte rateSpot = 0;
+long lastBeat = 0;
+float beatsPerMinute = 0;
+int beatAvg = 0;
+uint32_t irBuffer[100];
+uint32_t redBuffer[100];
+int32_t spo2 = 0;
+int8_t validSPO2 = 0;
+int32_t heartRate = 0;
+int8_t validHeartRate = 0;
+
+// Non-blocking state for HR/SpO2
+bool hrInitialCollectionDone = false;
+int hrSampleIndex = 0;
+
+// Temperature
+float bodyTemperature = 0.0;
+float tempOffset = 0.9;
+float lastTemp = 0.0;
+
+// Blood Pressure
+int systolic = 0;
+int diastolic = 0;
+float bp_zero_offset = 0.0;
+float bp_scale_factor = 30000.0;
+
+#define MAX_BP_SAMPLES 400
+float pressureHistory[MAX_BP_SAMPLES];
+float oscillationHistory[MAX_BP_SAMPLES];
+int bpSampleCount = 0;
+
+// ===== SENSOR STATUS FLAGS =====
+bool weightSensorReady = false;
+bool hrSensorReady = false;
+bool tempSensorReady = false;
+bool bpSensorReady = false;
+bool heightSensorReady = false;
+bool pumpPWMConfigured = false;
+
+// Auto-update variables - REDUCED INTERVALS FOR FASTER UPDATES
+unsigned long last_weight_update = 0;
+unsigned long last_temp_update = 0;
+unsigned long last_height_update = 0;
+const unsigned long WEIGHT_UPDATE_INTERVAL = 500;   // 500ms
+const unsigned long TEMP_UPDATE_INTERVAL = 500;     // 500ms
+const unsigned long HEIGHT_UPDATE_INTERVAL = 500;   // 500ms
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  
+  Serial.println("\n\n====================================");
+  Serial.println("  UNIFIED HEALTH MONITORING SYSTEM");
+  Serial.println("  ESP32 Multi-Sensor Integration");
+  Serial.println("====================================\n");
+  
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.setClock(400000);
+  delay(500);
+  
+  initWeightScale();
+  initHeightSensor();
+  initHeartRateSensor();
+  initTemperatureSensor();
+  initBloodPressureSensor();
+  
+  setupWiFi();
+  setupServerRoutes();
+  server.begin();
+  
+  Serial.println("\n✅ System Ready!");
+  Serial.println("====================================\n");
+}
+
+void initWeightScale() {
+  Serial.print("Initializing Weight Scale (HX711)... ");
+  weightScale.begin(WEIGHT_DOUT_PIN, WEIGHT_SCK_PIN);
+  delay(1000);
+  
+  if (weightScale.is_ready()) {
+    weightScale.set_scale(weight_calibration_factor);
+    weightScale.tare(20);
+    weightSensorReady = true;
+    Serial.println(" ✅ SUCCESS");
+  } else {
+    Serial.println(" ❌ FAILED");
+    weightSensorReady = false;
+  }
+}
+
+void updateWeight() {
+  if (!weightSensorReady) return;
+  
+  if (weightScale.is_ready()) {
+    float weight_grams = weightScale.get_units(5);
+    current_weight = weight_grams / 1000.0;
+    if (current_weight < 0) current_weight = abs(current_weight);
+    if (current_weight < 0.1) current_weight = 0.0;
+  }
+}
+
+void initHeightSensor() {
+  Serial.print("Initializing Height Sensor (VL53L1X)... ");
+  heightSensor.setTimeout(2000);
+  
+  if (heightSensor.init()) {
+    heightSensor.setDistanceMode(VL53L1X::Long);
+    heightSensor.setMeasurementTimingBudget(100000);
+    heightSensor.startContinuous(200);
+    heightSensorReady = true;
+    Serial.println(" ✅ SUCCESS");
+  } else {
+    Serial.println(" ❌ FAILED");
+    heightSensorReady = false;
+  }
+}
+
+void updateHeight() {
+  if (!heightSensorReady) return;
+  
+  heightSensor.read();
+  if (!heightSensor.timeoutOccurred()) {
+    float dist = heightSensor.ranging_data.range_mm / 10.0;
+    height_cm = sensor_mount_height_cm - dist;
+    if (height_cm < 0) height_cm = 0;
+    if (height_cm > 250) height_cm = 0;
+  }
+}
+
+// ===== HEART RATE & SPO2 FUNCTIONS - FIXED LED BRIGHTNESS =====
+void initHeartRateSensor() {
+  Serial.print("Initializing Heart Rate & SpO2 (MAX30102)... ");
+  
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println("❌ FAILED");
+    hrSensorReady = false;
+    return;
+  }
+  
+  // ✅ FIXED: Increased LED brightness from 50 to 255 (maximum)
+  byte ledBrightness = 255;   // Maximum brightness
+  byte sampleAverage = 1;
+  byte ledMode = 2;
+  byte sampleRate = 100;
+  int pulseWidth = 69;
+  int adcRange = 4096;
+  
+  particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
+  
+  for (int i = 0; i < RATE_SIZE; i++) {
+    rates[i] = 0;
+  }
+  
+  hrSensorReady = true;
+  hrInitialCollectionDone = false;
+  hrSampleIndex = 0;
+  
+  Serial.println("✅ SUCCESS (Max brightness enabled)");
+}
+
+void updateHeartRateAndSpO2() {
+  if (!hrSensorReady) return;
+  
+  // Always check sensor and handle requests
+  server.handleClient();
+  particleSensor.check();
+  
+  // Initial collection - collect multiple samples but yield to server
+  if (!hrInitialCollectionDone) {
+    while (hrSampleIndex < 100) {
+      // Handle server requests every 10 samples
+      if (hrSampleIndex % 10 == 0) {
+        server.handleClient();
+      }
+      
+      while (particleSensor.available() == false) {
+        particleSensor.check();
+        server.handleClient();
+      }
+      
+      redBuffer[hrSampleIndex] = particleSensor.getRed();
+      irBuffer[hrSampleIndex] = particleSensor.getIR();
+      particleSensor.nextSample();
+      hrSampleIndex++;
+    }
+    
+    maxim_heart_rate_and_oxygen_saturation(irBuffer, 100, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+    hrInitialCollectionDone = true;
+    hrSampleIndex = 0;
+    return;
+  }
+  
+  // Shift buffer
+  for (byte i = 25; i < 100; i++) {
+    redBuffer[i - 25] = redBuffer[i];
+    irBuffer[i - 25] = irBuffer[i];
+  }
+  
+  // Collect 25 new samples with server handling
+  for (byte i = 75; i < 100; i++) {
+    if (i % 5 == 0) {
+      server.handleClient();
+    }
+    
+    while (particleSensor.available() == false) {
+      particleSensor.check();
+      server.handleClient();
+    }
+    
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i] = particleSensor.getIR();
+    particleSensor.nextSample();
+    
+    long irValue = irBuffer[i];
+    
+    if (checkForBeat(irValue) == true) {
+      long delta = millis() - lastBeat;
+      lastBeat = millis();
+      
+      beatsPerMinute = 60 / (delta / 1000.0);
+      
+      if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+        rates[rateSpot++] = (byte)beatsPerMinute;
+        rateSpot %= RATE_SIZE;
+        
+        beatAvg = 0;
+        for (byte x = 0; x < RATE_SIZE; x++) {
+          beatAvg += rates[x];
+        }
+        beatAvg /= RATE_SIZE;
+      }
+    }
+    
+    if (millis() - lastBeat > 10000) {
+      beatsPerMinute = 0;
+      beatAvg = 0;
+    }
+  }
+  
+  maxim_heart_rate_and_oxygen_saturation(irBuffer, 100, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+}
+
+// ===== TEMPERATURE FUNCTIONS - FIXED UPDATE LOGIC =====
+void initTemperatureSensor() {
+  Serial.print("Initializing Temperature Sensor (MLX90614)... ");
+  
+  if (mlx.begin()) {
+    tempSensorReady = true;
+    Serial.println("✅ SUCCESS");
+  } else {
+    Serial.println(" ❌ FAILED");
+    tempSensorReady = false;
+  }
+}
+
+void updateTemperature() {
+  if (!tempSensorReady) return;
+  
+  const float TEMP_ALPHA = 0.3;  // Smoothing filter
+  
+  float temp = mlx.readObjectTempC();
+  
+  if (!isnan(temp) && temp > 20 && temp < 45) {
+    float newTemp = temp + tempOffset;
+    
+    // Apply smoothing filter
+    if (lastTemp == 0.0) {
+      bodyTemperature = newTemp;
+    } else {
+      bodyTemperature = TEMP_ALPHA * newTemp + (1 - TEMP_ALPHA) * lastTemp;
+    }
+    
+    lastTemp = bodyTemperature;
+  }
+}
+
+void initBloodPressureSensor() {
+  Serial.print("Initializing Blood Pressure Sensor... ");
+  
+  pinMode(PUMP_PIN, OUTPUT);
+  digitalWrite(PUMP_PIN, LOW);
+  bpScale.begin(BP_HX_DOUT_PIN, BP_HX_SCK_PIN);
+  delay(500);
+  
+  if (bpScale.wait_ready_timeout(1000)) {
+    bpSensorReady = true;
+    Serial.println("✅ SUCCESS");
+  } else {
+    Serial.println("❌ FAILED");
+  }
+}
+
+long readHX710B() {
+  unsigned long timeout = micros();
+  while (digitalRead(BP_HX_DOUT_PIN) == HIGH) {
+    if (micros() - timeout > 100000) return 0;
+  }
+  
+  long value = 0;
+  for (int i = 0; i < 24; i++) {
+    digitalWrite(BP_HX_SCK_PIN, HIGH);
+    delayMicroseconds(1);
+    value = (value << 1) | digitalRead(BP_HX_DOUT_PIN);
+    digitalWrite(BP_HX_SCK_PIN, LOW);
+    delayMicroseconds(1);
+  }
+  
+  digitalWrite(BP_HX_SCK_PIN, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(BP_HX_SCK_PIN, LOW);
+  
+  if (value & 0x800000) value |= 0xFF000000;
+  
+  return value;
+}
+
+float readBPPressure() {
+  static float filtered = 0.0;
+  const float ALPHA = 0.3;
+  
+  long sum = 0;
+  int valid = 0;
+  
+  for (int i = 0; i < 3; i++) {
+    long raw = readHX710B();
+    if (raw != 0) {
+      sum += raw;
+      valid++;
+    }
+    delay(5);
+  }
+  
+  if (valid == 0) return filtered;
+  
+  float rawAvg = sum / (float)valid;
+  float newPressure = (rawAvg - bp_zero_offset) / bp_scale_factor;
+  
+  filtered = ALPHA * newPressure + (1 - ALPHA) * filtered;
+  
+  if (filtered < 0) filtered = 0;
+  if (filtered > 300) filtered = 300;
+  
+  return filtered;
+}
+
+void setPumpPower(int dutyCycle) {
+  if (!pumpPWMConfigured) {
+    ledcAttach(PUMP_PIN, 1000, 8);
+    pumpPWMConfigured = true;
+  }
+  ledcWrite(PUMP_PIN, dutyCycle);
+}
+
+void stopPump() {
+  if (pumpPWMConfigured) {
+    ledcWrite(PUMP_PIN, 0);
+  } else {
+    digitalWrite(PUMP_PIN, LOW);
+  }
+}
+
+void setupWiFi() {
+  Serial.print("\n🌐 Connecting to WiFi: ");
+  Serial.println(ssid);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ WiFi Connected!");
+    Serial.print("📍 ESP32 IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("📶 Signal Strength: ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+    
+    Serial.println("\n╔════════════════════════════════════╗");
+    Serial.println("║   📱 MOBILE APP CONNECTION INFO   ║");
+    Serial.println("╠════════════════════════════════════╣");
+    Serial.print("║   Connect mobile to WiFi: ");
+    Serial.println(ssid);
+    Serial.print("║   ESP32 IP: ");
+    Serial.print(WiFi.localIP());
+    Serial.println("          ║");
+    Serial.println("║   Use this IP in api_config.dart   ║");
+    Serial.println("╚════════════════════════════════════╝\n");
+  } else {
+    Serial.println("\n❌ WiFi Connection Failed!");
+    Serial.println("⚠️  Check your WiFi credentials!");
+    Serial.println("⚠️  ESP32 will restart in 5 seconds...");
+    delay(5000);
+    ESP.restart();
+  }
+}
+
+void setupServerRoutes() {
+  server.enableCORS(true);
+  
+  server.on("/health", HTTP_GET, handleHealthData);
+  server.on("/status", HTTP_GET, handleStatus);
+  server.on("/weight", HTTP_GET, handleWeightAPI);
+  server.on("/height", HTTP_GET, handleHeightAPI);
+  server.on("/heartrate", HTTP_GET, handleHeartRateAPI);
+  server.on("/spo2", HTTP_GET, handleSpO2API);
+  server.on("/temperature", HTTP_GET, handleTemperatureAPI);
+  server.on("/bloodpressure", HTTP_GET, handleBloodPressureAPI);
+  server.on("/tare", HTTP_POST, handleTareAPI);
+  
+  server.on("/", HTTP_GET, []() {
+    String html = "<!DOCTYPE html><html><head><title>HealthX ESP32</title>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<style>body{font-family:Arial;margin:20px;background:#f0f0f0;}";
+    html += "h1{color:#1848A0;}.card{background:white;padding:20px;margin:10px 0;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);}";
+    html += "a{color:#1848A0;text-decoration:none;display:block;padding:8px;margin:4px 0;background:#e3f2fd;border-radius:4px;}";
+    html += "a:hover{background:#bbdefb;}</style></head><body>";
+    html += "<h1>🏥 HealthX ESP32 Sensor Device</h1>";
+    html += "<div class='card'>";
+    html += "<p><strong>Status:</strong> ✅ Online</p>";
+    html += "<p><strong>IP Address:</strong> " + WiFi.localIP().toString() + "</p>";
+    html += "<p><strong>WiFi:</strong> " + String(ssid) + "</p>";
+    html += "<p><strong>Signal:</strong> " + String(WiFi.RSSI()) + " dBm</p>";
+    html += "<p><strong>Uptime:</strong> " + String(millis() / 1000) + " seconds</p>";
+    html += "</div>";
+    html += "<div class='card'>";
+    html += "<h2>📡 Available Endpoints:</h2>";
+    html += "<a href='/health'>🔍 /health - All sensor data</a>";
+    html += "<a href='/status'>📊 /status - Device status</a>";
+    html += "<a href='/weight'>⚖️ /weight - Weight only</a>";
+    html += "<a href='/height'>📏 /height - Height only</a>";
+    html += "<a href='/heartrate'>❤️ /heartrate - Heart rate</a>";
+    html += "<a href='/spo2'>🫁 /spo2 - Blood oxygen</a>";
+    html += "<a href='/temperature'>🌡️ /temperature - Body temperature</a>";
+    html += "<a href='/bloodpressure'>💉 /bloodpressure - Blood pressure</a>";
+    html += "</div></body></html>";
+    server.send(200, "text/html", html);
+  });
+}
+
+// ===== FIXED: Update all sensors before reading =====
+void handleHealthData() {
+  // Update all sensors first
+  if (weightSensorReady) {
+    updateWeight();
+  }
+  
+  if (tempSensorReady) {
+    updateTemperature();
+  }
+  
+  if (heightSensorReady) {
+    updateHeight();
+  }
+  
+  // Calculate BMI
+  if (current_weight > 0 && height_cm > 0) {
+    bmi = current_weight / ((height_cm / 100.0) * (height_cm / 100.0));
+  }
+  
+  DynamicJsonDocument doc(2048);
+  
+  doc["weight"]["value"] = current_weight;
+  doc["weight"]["unit"] = "kg";
+  doc["weight"]["status"] = weightSensorReady;
+  
+  doc["bmi"]["value"] = bmi;
+  doc["bmi"]["height"] = height_cm;
+  doc["bmi"]["unit"] = "";
+  doc["bmi"]["status"] = (weightSensorReady && heightSensorReady);
+  
+  doc["heartRate"]["value"] = beatAvg;
+  doc["heartRate"]["unit"] = "bpm";
+  doc["heartRate"]["status"] = hrSensorReady;
+  
+  doc["spo2"]["value"] = spo2;
+  doc["spo2"]["unit"] = "%";
+  doc["spo2"]["status"] = hrSensorReady;
+  
+  doc["temperature"]["value"] = bodyTemperature;
+  doc["temperature"]["unit"] = "°C";
+  doc["temperature"]["status"] = tempSensorReady;
+  
+  doc["bloodPressure"]["systolic"] = systolic;
+  doc["bloodPressure"]["diastolic"] = diastolic;
+  doc["bloodPressure"]["unit"] = "mmHg";
+  doc["bloodPressure"]["status"] = bpSensorReady;
+  
+  doc["timestamp"] = millis();
+  doc["deviceIP"] = WiFi.localIP().toString();
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleStatus() {
+  DynamicJsonDocument doc(512);
+  doc["status"] = "online";
+  doc["uptime"] = millis() / 1000;
+  doc["wifi"]["connected"] = WiFi.status() == WL_CONNECTED;
+  doc["wifi"]["ssid"] = ssid;
+  doc["wifi"]["ip"] = WiFi.localIP().toString();
+  doc["wifi"]["rssi"] = WiFi.RSSI();
+  doc["sensors"]["weight"] = weightSensorReady;
+  doc["sensors"]["height"] = heightSensorReady;
+  doc["sensors"]["heartRate"] = hrSensorReady;
+  doc["sensors"]["temperature"] = tempSensorReady;
+  doc["sensors"]["bloodPressure"] = bpSensorReady;
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleWeightAPI() {
+  updateWeight();
+  
+  DynamicJsonDocument doc(256);
+  doc["weight"] = current_weight;
+  doc["unit"] = "kg";
+  doc["timestamp"] = millis();
+  doc["status"] = "success";
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleHeightAPI() {
+  updateHeight();
+  
+  DynamicJsonDocument doc(256);
+  doc["height"] = height_cm;
+  doc["unit"] = "cm";
+  doc["timestamp"] = millis();
+  doc["status"] = "success";
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleHeartRateAPI() {
+  DynamicJsonDocument doc(256);
+  doc["heartRate"] = beatAvg;
+  doc["unit"] = "bpm";
+  doc["timestamp"] = millis();
+  doc["status"] = "success";
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleSpO2API() {
+  DynamicJsonDocument doc(256);
+  doc["spo2"] = spo2;
+  doc["unit"] = "%";
+  doc["timestamp"] = millis();
+  doc["status"] = "success";
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleTemperatureAPI() {
+  updateTemperature();
+  
+  DynamicJsonDocument doc(256);
+  doc["temperature"] = bodyTemperature;
+  doc["unit"] = "°C";
+  doc["timestamp"] = millis();
+  doc["status"] = "success";
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleBloodPressureAPI() {
+  DynamicJsonDocument doc(256);
+  doc["systolic"] = systolic;
+  doc["diastolic"] = diastolic;
+  doc["unit"] = "mmHg";
+  doc["timestamp"] = millis();
+  doc["status"] = "success";
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleTareAPI() {
+  if (weightSensorReady) {
+    weightScale.tare(20);
+    
+    DynamicJsonDocument doc(200);
+    doc["status"] = "success";
+    doc["message"] = "Scale tared successfully";
+    doc["timestamp"] = millis();
+    
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+    
+    Serial.println("✅ Scale tared via API");
+  } else {
+    server.send(500, "application/json", "{\"status\":\"error\",\"message\":\"Weight sensor not ready\"}");
+  }
+}
+
+void loop() {
+  // PRIORITY 1: Always handle server requests first
+  server.handleClient();
+  
+  // PRIORITY 2: Check WiFi
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("⚠️  WiFi disconnected! Reconnecting...");
+    setupWiFi();
+  }
+  
+  unsigned long currentTime = millis();
+  
+  // Update weight periodically
+  if (currentTime - last_weight_update >= WEIGHT_UPDATE_INTERVAL) {
+    if (weightSensorReady) {
+      updateWeight();
+    }
+    last_weight_update = currentTime;
+  }
+  
+  // Update temperature periodically
+  if (currentTime - last_temp_update >= TEMP_UPDATE_INTERVAL) {
+    if (tempSensorReady) {
+      updateTemperature();
+    }
+    last_temp_update = currentTime;
+  }
+  
+  // Update height periodically
+  if (currentTime - last_height_update >= HEIGHT_UPDATE_INTERVAL) {
+    if (heightSensorReady) {
+      updateHeight();
+    }
+    last_height_update = currentTime;
+  }
+  
+  // Update HR & SpO2 (with embedded server.handleClient() calls)
+  if (hrSensorReady) {
+    updateHeartRateAndSpO2();
+  }
+  
+  // Small delay to prevent watchdog
+  delay(1);
+}
+
+
+import 'package:flutter/material.dart';
+import 'dart:async';
+import 'healthworker_dashboard.dart';
+import 'api_service.dart';
+
+class ParameterMeasurementScreen extends StatefulWidget {
+  final String title;
+  final IconData icon;
+  final Color color;
+  final String paramKey;
+  final String patientName;
+  final Function(Map<String, dynamic>) onDataSaved;
+
+  const ParameterMeasurementScreen({
+    Key? key,
+    required this.title,
+    required this.icon,
+    required this.color,
+    required this.paramKey,
+    required this.patientName,
+    required this.onDataSaved,
+  }) : super(key: key);
+
+  @override
+  State<ParameterMeasurementScreen> createState() =>
+      _ParameterMeasurementScreenState();
+}
+
+class _ParameterMeasurementScreenState
+    extends State<ParameterMeasurementScreen> {
+  bool isStarted = false;
+  bool isLoading = false;
+  bool isSaved = false;
+  bool showInstructions = true;
+  Timer? _sensorTimer;
+  Map<String, dynamic> liveData = {};
+  Map<String, dynamic> finalData = {};
+
+  Map<String, String> parameterImages = {
+    'bmi': 'images/body-mass-index.png',
+    'height': 'images/height.png',
+    'weight': 'images/weight.png',
+    'temperature': 'images/body-temperature.png',
+    'heart_rate': 'images/oxygen-saturation.png',
+    'spo2': 'images/oxygen-saturation.png',
+    'bp': 'images/blood-pressure.png',
+    'vitals': 'images/oxygen-saturation.png',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _showInstructionsDialog();
+    });
+  }
+
+  @override
+  void dispose() {
+    _sensorTimer?.cancel();
+    super.dispose();
+  }
+
+  void _showInstructionsDialog() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (context) => _InstructionsDialog(
+          paramKey: widget.paramKey,
+          title: widget.title,
+          color: widget.color,
+          imagePath: parameterImages[widget.paramKey] ?? 'images/oxygen-saturation.png',
+          onComplete: () {
+            Navigator.pop(context);
+            setState(() => showInstructions = false);
+          },
+        ),
+      ),
+    );
+  }
+
+  void _startMeasurement() async {
+    setState(() {
+      isStarted = true;
+      isLoading = true;
+      isSaved = false;
+      liveData = {};
+      finalData = {};
+    });
+    await _activateSensor();
+    _startRealtimePolling();
+  }
+
+  Future<void> _activateSensor() async {
+    await Future.delayed(Duration(milliseconds: 1500));
+  }
+
+  void _startRealtimePolling() {
+    _sensorTimer = Timer.periodic(Duration(milliseconds: 500), (timer) async {
+      final result = await ApiService.getEsp32HealthData();
+      if (result['success'] != false && mounted) {
+        setState(() {
+          isLoading = false;
+          _updateLiveData(result);
+        });
+      }
+    });
+  }
+
+  void _updateLiveData(Map<String, dynamic> espData) {
+    print('Updating live data for ${widget.paramKey}');
+    print('ESP Data received: $espData');
+
+    switch (widget.paramKey) {
+      case 'bmi':
+        liveData = {
+          'weight': espData['weight']?['value']?.toDouble() ?? 0.0,
+          'height': espData['bmi']?['height']?.toDouble() ?? 170.0,
+          'bmi': espData['bmi']?['value']?.toDouble() ?? 0.0,
+        };
+        print('BMI Live Data: $liveData');
+        break;
+
+      case 'temperature':
+        double temp = espData['temperature']?['value']?.toDouble() ?? 0.0;
+        liveData = {
+          'temperature': temp,
+        };
+        print('Temperature Live Data: $liveData (from ESP: $temp)');
+        break;
+
+      case 'vitals':
+        int hr = espData['heartRate']?['value'] ?? 0;
+        int spo2Val = espData['spo2']?['value'] ?? 0;
+        liveData = {
+          'heart_rate': hr,
+          'spo2': spo2Val,
+        };
+        print('Vitals Live Data: $liveData');
+        break;
+
+      case 'bp':
+        int sys = espData['bloodPressure']?['systolic'] ?? 0;
+        int dia = espData['bloodPressure']?['diastolic'] ?? 0;
+        liveData = {
+          'systolic': sys,
+          'diastolic': dia,
+        };
+        print('BP Live Data: $liveData');
+        break;
+    }
+  }
+
+  void _resetMeasurement() {
+    setState(() {
+      isStarted = false;
+      isLoading = false;
+      isSaved = false;
+      liveData = {};
+      finalData = {};
+    });
+    _sensorTimer?.cancel();
+  }
+
+  Future<void> _tareScale() async {
+    try {
+      await ApiService.tareWeightScale();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.check_circle_outline, color: AppColors.white),
+                SizedBox(width: 12),
+                Text('Scale tared successfully!'),
+              ],
+            ),
+            backgroundColor: AppColors.success,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.error_outline, color: AppColors.white),
+                SizedBox(width: 12),
+                Text('Failed to tare scale: $e'),
+              ],
+            ),
+            backgroundColor: AppColors.error,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+    }
+  }
+
+  void _saveData() {
+    if (liveData.isEmpty) return;
+    setState(() {
+      finalData = Map.from(liveData);
+      isSaved = true;
+    });
+    widget.onDataSaved(finalData);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Icon(Icons.check_circle_outline, color: AppColors.white),
+              SizedBox(width: 12),
+              Text('${widget.title} data saved!'),
+            ],
+          ),
+          backgroundColor: AppColors.success,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    }
+  }
+
+  String _getBMICategory(double bmi) {
+    if (bmi < 18.5) return 'Underweight';
+    if (bmi < 25) return 'Normal';
+    if (bmi < 30) return 'Overweight';
+    return 'Obese';
+  }
+
+  Color _getBMICategoryColor(double bmi) {
+    if (bmi < 18.5) return Color(0xFF3B82F6);
+    if (bmi < 25) return AppColors.success;
+    if (bmi < 30) return Color(0xFFF59E0B);
+    return AppColors.error;
+  }
+
+  String _getTemperatureStatus(double temp) {
+    if (temp < 36.1) return 'Low';
+    if (temp <= 37.2) return 'Normal';
+    if (temp <= 38.0) return 'Elevated';
+    return 'Fever';
+  }
+
+  Color _getTemperatureColor(double temp) {
+    if (temp < 36.1) return Color(0xFF3B82F6);
+    if (temp <= 37.2) return AppColors.success;
+    if (temp <= 38.0) return Color(0xFFF59E0B);
+    return AppColors.error;
+  }
+
+  String _getHeartRateStatus(int hr) {
+    if (hr < 60) return 'Low';
+    if (hr <= 100) return 'Normal';
+    if (hr <= 120) return 'Elevated';
+    return 'High';
+  }
+
+  Color _getHeartRateColor(int hr) {
+    if (hr < 60) return Color(0xFF3B82F6);
+    if (hr <= 100) return AppColors.success;
+    if (hr <= 120) return Color(0xFFF59E0B);
+    return AppColors.error;
+  }
+
+  String _getSpO2Status(int spo2) {
+    if (spo2 >= 95) return 'Normal';
+    if (spo2 >= 90) return 'Low';
+    return 'Critical';
+  }
+
+  Color _getSpO2Color(int spo2) {
+    if (spo2 >= 95) return AppColors.success;
+    if (spo2 >= 90) return Color(0xFFF59E0B);
+    return AppColors.error;
+  }
+
+  String _getBloodPressureStatus(int systolic, int diastolic) {
+    if (systolic < 120 && diastolic < 80) return 'Normal';
+    if (systolic < 130 && diastolic < 80) return 'Elevated';
+    if (systolic < 140 || diastolic < 90) return 'Stage 1 Hypertension';
+    if (systolic < 180 || diastolic < 120) return 'Stage 2 Hypertension';
+    return 'Hypertensive Crisis';
+  }
+
+  Color _getBloodPressureColor(int systolic, int diastolic) {
+    if (systolic < 120 && diastolic < 80) return AppColors.success;
+    if (systolic < 130 && diastolic < 80) return Color(0xFF3B82F6);
+    if (systolic < 140 || diastolic < 90) return Color(0xFFF59E0B);
+    return AppColors.error;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      appBar: AppBar(
+        backgroundColor: Color(0xFF1848A0),
+        leading: IconButton(
+          icon: Icon(Icons.close_rounded, color: AppColors.white, size: 28),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Row(
+          children: [
+            Container(
+              padding: EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.white.withOpacity(0.2),
+                shape: BoxShape.circle,
+              ),
+              child: Image.asset(
+                parameterImages[widget.paramKey] ?? 'images/oxygen-saturation.png',
+                width: 24,
+                height: 24,
+                errorBuilder: (context, error, stackTrace) =>
+                    Icon(widget.icon, color: AppColors.white, size: 24),
+              ),
+            ),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                widget.title,
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.help_outline, color: AppColors.white),
+            tooltip: 'View Instructions',
+            onPressed: _showInstructionsDialog,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: SingleChildScrollView(
+              padding: EdgeInsets.all(24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [Color(0xFF1848A0), Color(0xFF2563C9)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Color(0xFF1848A0).withOpacity(0.3),
+                          blurRadius: 12,
+                          offset: Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.white.withOpacity(0.2),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(Icons.person, color: AppColors.white, size: 24),
+                        ),
+                        SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Patient',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: AppColors.white.withOpacity(0.8),
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              SizedBox(height: 2),
+                              Text(
+                                widget.patientName,
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                  color: AppColors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(height: 24),
+                  if (isStarted) _buildMeasurementDisplay(),
+                ],
+              ),
+            ),
+          ),
+          _buildBottomActions(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMeasurementDisplay() {
+    if (isLoading) {
+      return Container(
+        padding: EdgeInsets.all(40),
+        decoration: BoxDecoration(
+          color: AppColors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Color(0xFF1848A0).withOpacity(0.3), width: 2),
+        ),
+        child: Column(
+          children: [
+            TweenAnimationBuilder(
+              tween: Tween<double>(begin: 0, end: 1),
+              duration: Duration(seconds: 2),
+              builder: (context, double value, child) => Transform.scale(
+                scale: 0.8 + (value * 0.2),
+                child: Container(
+                  padding: EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: Color(0xFF1848A0).withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Image.asset(
+                    parameterImages[widget.paramKey] ?? 'images/oxygen-saturation.png',
+                    width: 80,
+                    height: 80,
+                    errorBuilder: (context, error, stackTrace) =>
+                        Icon(Icons.sensors, size: 80, color: Color(0xFF1848A0)),
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(
+                3,
+                    (index) => AnimatedContainer(
+                  duration: Duration(milliseconds: 300),
+                  margin: EdgeInsets.symmetric(horizontal: 4),
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    color: Color(0xFF1848A0).withOpacity(0.5 + (index * 0.2)),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(height: 20),
+            Text(
+              'Connecting to Sensor',
+              style: TextStyle(
+                fontSize: 18,
+                color: Color(0xFF1848A0),
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Please wait while we establish connection...',
+              style: TextStyle(
+                fontSize: 14,
+                color: AppColors.textLight,
+                fontWeight: FontWeight.w500,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      padding: EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppColors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Color(0xFF1848A0), width: 2),
+        boxShadow: [
+          BoxShadow(
+            color: Color(0xFF1848A0).withOpacity(0.2),
+            blurRadius: 15,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.success.withOpacity(0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.sensors, color: AppColors.success, size: 28),
+              ),
+              SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Sensor Connected',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.success,
+                      ),
+                    ),
+                    Text(
+                      'Live Reading',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.textDark,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppColors.success,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.success.withOpacity(0.3),
+                      blurRadius: 8,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: AppColors.white,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    SizedBox(width: 8),
+                    Text(
+                      'ACTIVE',
+                      style: TextStyle(
+                        color: AppColors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: 20),
+          if (widget.paramKey == 'bmi') ..._buildBMIDisplay(),
+          if (widget.paramKey == 'temperature') ..._buildTemperatureDisplay(),
+          if (widget.paramKey == 'vitals') ..._buildVitalsDisplay(),
+          if (widget.paramKey == 'bp') ..._buildBPDisplay(),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildBMIDisplay() {
+    double weight = liveData['weight'] ?? 0.0;
+    double height = liveData['height'] ?? 0.0;
+    double bmi = liveData['bmi'] ?? 0.0;
+
+    return [
+      _buildDataRow('Weight', weight.toStringAsFixed(1), 'kg', 'images/weight.png'),
+      Container(
+        margin: EdgeInsets.only(bottom: 16),
+        child: SizedBox(
+          width: double.infinity,
+          height: 50,
+          child: OutlinedButton(
+            onPressed: _tareScale,
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(color: Color(0xFF1848A0), width: 2),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.refresh, color: Color(0xFF1848A0), size: 20),
+                SizedBox(width: 8),
+                Text(
+                  'Tare Scale',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1848A0),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      _buildDataRow('Height', height.toStringAsFixed(1), 'cm', 'images/height.png'),
+      _buildDataRow('BMI', bmi.toStringAsFixed(1), '', 'images/body-mass-index.png'),
+      if (bmi > 0) ...[
+        SizedBox(height: 8),
+        _buildStatusIndicator(
+          'BMI Category',
+          _getBMICategory(bmi),
+          _getBMICategoryColor(bmi),
+          Icons.analytics,
+        ),
+      ],
+    ];
+  }
+
+  List<Widget> _buildTemperatureDisplay() {
+    double temp = liveData['temperature'] ?? 0.0;
+
+    return [
+      _buildDataRow('Body Temperature', temp.toStringAsFixed(1), '°C', 'images/body-temperature.png'),
+      if (temp > 0) ...[
+        SizedBox(height: 8),
+        _buildStatusIndicator(
+          'Temperature Status',
+          _getTemperatureStatus(temp),
+          _getTemperatureColor(temp),
+          Icons.thermostat,
+        ),
+      ],
+    ];
+  }
+
+  List<Widget> _buildVitalsDisplay() {
+    int hr = liveData['heart_rate'] ?? 0;
+    int spo2 = liveData['spo2'] ?? 0;
+
+    return [
+      _buildDataRow('Heart Rate', hr.toString(), 'bpm', 'images/oxygen-saturation.png'),
+      _buildDataRow('Blood Oxygen (SpO2)', spo2.toString(), '%', 'images/oxygen-saturation.png'),
+      if (hr > 0 || spo2 > 0) ...[
+        SizedBox(height: 8),
+        if (hr > 0)
+          Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: _buildStatusIndicator(
+              'Heart Rate Status',
+              _getHeartRateStatus(hr),
+              _getHeartRateColor(hr),
+              Icons.favorite,
+            ),
+          ),
+        if (spo2 > 0)
+          _buildStatusIndicator(
+            'Oxygen Status',
+            _getSpO2Status(spo2),
+            _getSpO2Color(spo2),
+            Icons.air,
+          ),
+      ],
+    ];
+  }
+
+  List<Widget> _buildBPDisplay() {
+    int systolic = liveData['systolic'] ?? 0;
+    int diastolic = liveData['diastolic'] ?? 0;
+
+    return [
+      _buildDataRow('Systolic Pressure', systolic.toString(), 'mmHg', 'images/blood-pressure.png'),
+      _buildDataRow('Diastolic Pressure', diastolic.toString(), 'mmHg', 'images/blood-pressure.png'),
+      if (systolic > 0 && diastolic > 0) ...[
+        SizedBox(height: 8),
+        _buildStatusIndicator(
+          'Blood Pressure Status',
+          _getBloodPressureStatus(systolic, diastolic),
+          _getBloodPressureColor(systolic, diastolic),
+          Icons.monitor_heart,
+        ),
+      ],
+    ];
+  }
+
+  Widget _buildDataRow(String label, String value, String unit, String imagePath) {
+    return Container(
+      margin: EdgeInsets.only(bottom: 16),
+      padding: EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            AppColors.background,
+            Color(0xFF1848A0).withOpacity(0.05),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Color(0xFF1848A0).withOpacity(0.3), width: 2),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: AppColors.textLight,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      value,
+                      style: TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF1848A0),
+                      ),
+                    ),
+                    if (unit.isNotEmpty) ...[
+                      SizedBox(width: 8),
+                      Padding(
+                        padding: EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          unit,
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: AppColors.textLight,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Color(0xFF1848A0).withOpacity(0.1),
+              shape: BoxShape.circle,
+            ),
+            child: Image.asset(
+              imagePath,
+              width: 28,
+              height: 28,
+              errorBuilder: (context, error, stackTrace) =>
+                  Icon(Icons.healing, color: Color(0xFF1848A0), size: 28),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatusIndicator(String label, String status, Color color, IconData icon) {
+    return Container(
+      padding: EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color, width: 2),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 24),
+          SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textLight,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  status,
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: color,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBottomActions() {
+    return Container(
+      padding: EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppColors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: Offset(0, -5),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!isStarted)
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: _startMeasurement,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Color(0xFF1848A0),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    elevation: 4,
+                    shadowColor: Color(0xFF1848A0).withOpacity(0.4),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.play_arrow, color: AppColors.white, size: 28),
+                      SizedBox(width: 12),
+                      Text(
+                        'Start Measurement',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else
+              Row(
+                children: [
+                  Expanded(
+                    child: SizedBox(
+                      height: 56,
+                      child: OutlinedButton(
+                        onPressed: _resetMeasurement,
+                        style: OutlinedButton.styleFrom(
+                          side: BorderSide(color: Color(0xFF1848A0), width: 2),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.refresh, color: Color(0xFF1848A0), size: 24),
+                            SizedBox(width: 8),
+                            Text(
+                              'Reset',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1848A0),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    flex: 2,
+                    child: SizedBox(
+                      height: 56,
+                      child: ElevatedButton(
+                        onPressed: liveData.isNotEmpty && !isSaved ? _saveData : null,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: isSaved ? AppColors.textLight : AppColors.success,
+                          disabledBackgroundColor: AppColors.textLight,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          elevation: isSaved ? 0 : 4,
+                          shadowColor: AppColors.success.withOpacity(0.4),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              isSaved ? Icons.check_circle : Icons.save,
+                              color: AppColors.white,
+                              size: 24,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              isSaved ? 'Saved' : 'Save Data',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: AppColors.white,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _InstructionsDialog extends StatefulWidget {
+  final String paramKey;
+  final String title;
+  final Color color;
+  final String imagePath;
+  final VoidCallback onComplete;
+
+  const _InstructionsDialog({
+    Key? key,
+    required this.paramKey,
+    required this.title,
+    required this.color,
+    required this.imagePath,
+    required this.onComplete,
+  }) : super(key: key);
+
+  @override
+  State<_InstructionsDialog> createState() => _InstructionsDialogState();
+}
+
+class _InstructionsDialogState extends State<_InstructionsDialog> {
+  int currentStep = 0;
+  late List<InstructionStep> steps;
+
+  @override
+  void initState() {
+    super.initState();
+    steps = _getInstructions(widget.paramKey);
+  }
+
+  List<InstructionStep> _getInstructions(String paramKey) {
+    Map<String, List<InstructionStep>> instructionsMap = {
+      'bmi': [
+        InstructionStep(
+          title: 'Prepare the Scale',
+          description: 'Ensure the scale is placed on a flat, stable surface.',
+          icon: Icons.info_outline,
+          color: Color(0xFF1848A0),
+        ),
+        InstructionStep(
+          title: 'Remove Heavy Items',
+          description: 'Ask the patient to remove shoes and heavy clothing for accurate weight measurement.',
+          icon: Icons.accessibility_new,
+          color: Color(0xFF10B981),
+        ),
+        InstructionStep(
+          title: 'Position Correctly',
+          description: 'Patient should stand straight under the height sensor with feet together.',
+          icon: Icons.straighten,
+          color: Color(0xFFF59E0B),
+        ),
+        InstructionStep(
+          title: 'Wait for Reading',
+          description: 'Keep body still until you get a stable reading on the display.',
+          icon: Icons.timer,
+          color: Color(0xFF8B5CF6),
+        ),
+      ],
+      'temperature': [
+        InstructionStep(
+          title: 'Clean the Sensor',
+          description: 'Wipe the temperature sensor with a clean, dry cloth before use.',
+          icon: Icons.cleaning_services,
+          color: Color(0xFF1848A0),
+        ),
+        InstructionStep(
+          title: 'Position Sensor',
+          description: 'Hold the sensor 2-3 cm away from the center of the patient\'s forehead.',
+          icon: Icons.location_on,
+          color: Color(0xFF10B981),
+        ),
+        InstructionStep(
+          title: 'Keep Steady',
+          description: 'Hold the sensor steady and press the measurement button.',
+          icon: Icons.pan_tool,
+          color: Color(0xFFF59E0B),
+        ),
+        InstructionStep(
+          title: 'Wait for Beep',
+          description: 'Wait for the device to beep indicating measurement is complete.',
+          icon: Icons.notifications_active,
+          color: Color(0xFF8B5CF6),
+        ),
+      ],
+      'vitals': [
+        InstructionStep(
+          title: 'Patient Preparation',
+          description: 'Ask the patient to sit comfortably and relax for a few minutes.',
+          icon: Icons.event_seat,
+          color: Color(0xFF1848A0),
+        ),
+        InstructionStep(
+          title: 'Insert Finger',
+          description: 'Have the patient place their index finger firmly into the pulse oximeter.',
+          icon: Icons.touch_app,
+          color: Color(0xFF10B981),
+        ),
+        InstructionStep(
+          title: 'Stay Still',
+          description: 'Patient should keep their finger still and breathe normally during measurement.',
+          icon: Icons.self_improvement,
+          color: Color(0xFFF59E0B),
+        ),
+        InstructionStep(
+          title: 'Wait for Results',
+          description: 'The device will take about 10-15 seconds to display heart rate and SpO2.',
+          icon: Icons.favorite,
+          color: Color(0xFFEF4444),
+        ),
+      ],
+      'bp': [
+        InstructionStep(
+          title: 'Rest Period',
+          description: 'Have the patient sit quietly and relax for 5 minutes before measurement.',
+          icon: Icons.timer,
+          color: Color(0xFF1848A0),
+        ),
+        InstructionStep(
+          title: 'Apply Cuff',
+          description: 'Wrap the cuff snugly around the patient\'s wrist, about 1 cm from the hand.',
+          icon: Icons.watch,
+          color: Color(0xFF10B981),
+        ),
+        InstructionStep(
+          title: 'Position Wrist',
+          description: 'Keep the wrist at heart level, palm facing up.',
+          icon: Icons.favorite,
+          color: Color(0xFFF59E0B),
+        ),
+        InstructionStep(
+          title: 'Start Measurement',
+          description: 'Press start and remain still during inflation and deflation of the cuff.',
+          icon: Icons.play_circle,
+          color: Color(0xFF8B5CF6),
+        ),
+      ],
+    };
+    return instructionsMap[paramKey] ?? [];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (steps.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        widget.onComplete();
+      });
+      return SizedBox.shrink();
+    }
+
+    return Scaffold(
+      backgroundColor: AppColors.white,
+      appBar: AppBar(
+        backgroundColor: AppColors.white,
+        elevation: 0,
+        leading: IconButton(
+          icon: Icon(Icons.close, color: AppColors.textDark),
+          onPressed: () => widget.onComplete(),
+        ),
+        title: Row(
+          children: [
+            Image.asset(
+              widget.imagePath,
+              width: 32,
+              height: 32,
+              errorBuilder: (context, error, stackTrace) {
+                return Icon(Icons.healing, color: Color(0xFF1848A0), size: 32);
+              },
+            ),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                widget.title,
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.textDark,
+                ),
+              ),
+            ),
+          ],
+        ),
+        centerTitle: false,
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: EdgeInsets.all(20),
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List.generate(
+                    steps.length,
+                        (index) => AnimatedContainer(
+                      duration: Duration(milliseconds: 300),
+                      margin: EdgeInsets.symmetric(horizontal: 4),
+                      height: 8,
+                      width: currentStep == index ? 32 : 8,
+                      decoration: BoxDecoration(
+                        color: currentStep == index
+                            ? Color(0xFF1848A0)
+                            : Color(0xFF1848A0).withOpacity(0.3),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ),
+                ),
+                SizedBox(height: 12),
+                Text(
+                  'Step ${currentStep + 1} of ${steps.length}',
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: AppColors.textLight,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 32),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 120,
+                    height: 120,
+                    decoration: BoxDecoration(
+                      color: steps[currentStep].color.withOpacity(0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      steps[currentStep].icon,
+                      size: 60,
+                      color: steps[currentStep].color,
+                    ),
+                  ),
+                  SizedBox(height: 40),
+                  Text(
+                    steps[currentStep].title,
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textDark,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  SizedBox(height: 20),
+                  Text(
+                    steps[currentStep].description,
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: AppColors.textLight,
+                      height: 1.6,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: EdgeInsets.all(20),
+            child: Row(
+              children: [
+                if (currentStep > 0)
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () {
+                        setState(() {
+                          currentStep--;
+                        });
+                      },
+                      style: OutlinedButton.styleFrom(
+                        padding: EdgeInsets.symmetric(vertical: 16),
+                        side: BorderSide(color: Color(0xFF1848A0), width: 2),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(15),
+                        ),
+                      ),
+                      child: Text(
+                        'Previous',
+                        style: TextStyle(
+                          color: Color(0xFF1848A0),
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (currentStep > 0) SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () {
+                      if (currentStep < steps.length - 1) {
+                        setState(() {
+                          currentStep++;
+                        });
+                      } else {
+                        widget.onComplete();
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Color(0xFF1848A0),
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                      elevation: 2,
+                    ),
+                    child: Text(
+                      currentStep < steps.length - 1 ? 'Next' : 'Start Measurement',
+                      style: TextStyle(
+                        color: AppColors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
+}
+
+class InstructionStep {
+  final String title;
+  final String description;
+  final IconData icon;
+  final Color color;
+
+  InstructionStep({
+    required this.title,
+    required this.description,
+    required this.icon,
+    required this.color,
+  });
+}
+
+class ApiConfig {
+  // ===== BASE URLs =====
+  static const String baseUrl = 'http://192.168.8.62:8080/healthx/api';
+  static const String esp32Url = 'http://192.168.8.53';
+
+  // ===== WEB SERVER ENDPOINTS (Database) =====
+  static const String authEndpoint = '$baseUrl/auth.php';
+  static const String getPatientsEndpoint = '$baseUrl/get_patients.php';
+  static const String getReadingsEndpoint = '$baseUrl/get_readings.php';
+  static const String saveReadingEndpoint = '$baseUrl/save_reading.php';
+  static const String deletePatientEndpoint = '$baseUrl/delete_patient.php';
+  static const String deleteReadingEndpoint = '$baseUrl/delete_reading.php';
+  static const String updateReadingEndpoint = '$baseUrl/update_reading.php';
+
+  // ===== ESP32 ENDPOINTS (Sensor Device) =====
+  static const String esp32HealthEndpoint = '$esp32Url/health';
+  static const String esp32StatusEndpoint = '$esp32Url/status';
+  static const String esp32WeightEndpoint = '$esp32Url/weight';
+  static const String esp32HeightEndpoint = '$esp32Url/height';
+  static const String esp32HeartRateEndpoint = '$esp32Url/heartrate';
+  static const String esp32SpO2Endpoint = '$esp32Url/spo2';
+  static const String esp32TemperatureEndpoint = '$esp32Url/temperature';
+  static const String esp32BloodPressureEndpoint = '$esp32Url/bloodpressure';
+  static const String esp32TareEndpoint = '$esp32Url/tare';
+}
+
+
+
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'api_config.dart';
+
+class ApiService {
+  // ===== AUTHENTICATION =====
+
+  static Future<Map<String, dynamic>> login(String email, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse(ApiConfig.authEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'action': 'login',
+          'email': email,
+          'password': password,
+        }),
+      );
+
+      return jsonDecode(response.body);
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> signup(
+      String name, String email, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse(ApiConfig.authEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'action': 'signup',
+          'name': name,
+          'email': email,
+          'password': password,
+        }),
+      );
+
+      return jsonDecode(response.body);
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  // ===== PATIENT MANAGEMENT =====
+
+  static Future<Map<String, dynamic>> getPatients() async {
+    try {
+      final response = await http.get(
+        Uri.parse(ApiConfig.getPatientsEndpoint),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Failed to fetch patients'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> deletePatient(dynamic patientId) async {
+    try {
+      int id = patientId is String ? int.parse(patientId) : patientId;
+
+      final response = await http.post(
+        Uri.parse(ApiConfig.deletePatientEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'patient_id': id}),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Server error: ${response.statusCode}'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  // ===== HEALTH READINGS =====
+
+  static Future<Map<String, dynamic>> getReadings(String userEmail) async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.getReadingsEndpoint}?user_email=$userEmail'),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Failed to fetch readings'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> saveReading(
+      Map<String, dynamic> readingData) async {
+    try {
+      final response = await http.post(
+        Uri.parse(ApiConfig.saveReadingEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(readingData),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Failed to save reading'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> deleteReading(dynamic readingId) async {
+    try {
+      int id = readingId is String ? int.parse(readingId) : readingId;
+
+      final response = await http.post(
+        Uri.parse(ApiConfig.deleteReadingEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'reading_id': id}),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Failed to delete reading'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> updateReading(
+      dynamic readingId, Map<String, dynamic> readingData) async {
+    try {
+      int id = readingId is String ? int.parse(readingId) : readingId;
+
+      final response = await http.post(
+        Uri.parse(ApiConfig.updateReadingEndpoint),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'reading_id': id,
+          'bmi': readingData['bmi'],
+          'heart_rate': readingData['heart_rate'],
+          'spo2': readingData['spo2'],
+          'temperature': readingData['temperature'],
+          'systolic': readingData['systolic'],
+          'diastolic': readingData['diastolic'],
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false, 'message': 'Failed to update reading'};
+    } catch (e) {
+      return {'success': false, 'message': 'Connection error: $e'};
+    }
+  }
+
+  // ===== ESP32 SENSOR DATA =====
+
+  /// Get all health data from ESP32 (combined endpoint)
+  static Future<Map<String, dynamic>> getEsp32HealthData() async {
+    try {
+      final response = await http.get(
+        Uri.parse(ApiConfig.esp32HealthEndpoint),
+      ).timeout(Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return {'success': true, ...data};
+      }
+      return {'success': false, 'message': 'Failed to fetch ESP32 data'};
+    } catch (e) {
+      return {'success': false, 'message': 'ESP32 connection error: $e'};
+    }
+  }
+
+  /// Get individual sensor readings
+  static Future<Map<String, dynamic>> getWeight() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/weight'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getHeight() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/height'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getHeartRate() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/heartrate'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getSpO2() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/spo2'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getTemperature() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/temperature'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> getBloodPressure() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${ApiConfig.esp32Url}/bloodpressure'),
+      ).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {'success': false};
+    } catch (e) {
+      return {'success': false, 'message': '$e'};
+    }
+  }
+
+  /// Tare the weight scale (reset to zero)
+  static Future<Map<String, dynamic>> tareWeightScale() async {
+    try {
+      final response = await http.post(
+        Uri.parse('${ApiConfig.esp32Url}/tare'),
+        headers: {'Content-Type': 'application/json'},
+      ).timeout(Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return {
+          'success': true,
+          'message': data['message'] ?? 'Scale tared successfully',
+          'data': data,
+        };
+      }
+      return {
+        'success': false,
+        'message': 'Failed to tare scale',
+        'error': 'Status code: ${response.statusCode}',
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'message': 'Error connecting to scale',
+        'error': e.toString(),
+      };
+    }
+  }
+}

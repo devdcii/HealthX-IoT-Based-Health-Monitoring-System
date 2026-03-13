@@ -1,0 +1,14 @@
+App Bundle
+
+& "C:\Program Files\Android\Android Studio\jbr\bin\keytool.exe" -genkey -v -keystore "$env:USERPROFILE\upload-keystore.jks" -storetype JKS -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+
+
+move C:\Users\ACER\upload-keystore.jks C:\Users\ACER\Documents\healthhccx\android\app\upload-keystore.jks
+
+dir C:\Users\ACER\Documents\healthhccx\android\app\upload-keystore.jks
+
+key.properties
+storePassword=chanchan
+keyPassword=chanchan
+keyAlias=upload
+storeFile=upload-keystore.jks

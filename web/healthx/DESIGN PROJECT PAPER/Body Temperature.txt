@@ -1,0 +1,146 @@
+Body Temperature
+
+Most GY-906 sensors read 0.5°C to 1.5°C lower than a medical thermometer.
+
+So we need to apply an offset to correct the reading.
+
+Formula;
+
+CalibratedTemp = RawTemp + Offset
+
+Offset = ActualBodyTemp − RawSensorTemp
+
+Used when you test multiple people.
+OffsetAverage = (Σ (Actual_i − Raw_i)) / N
+Σ = sum
+
+i = each measurement
+
+N = number of samples
+
+CalibratedTemp = RawTemp + OffsetAverage
+
+Example;
+Person	Actual Temp	Sensor Temp	Difference
+1	36.4	35.2	+1.2
+2	36.7	35.4	+1.3
+3	36.8	35.3	+1.5
+4	36.5	35.1	+1.4
+
+Average offset:
+
+(1.2 + 1.3 + 1.5 + 1.4) / 4 = 1.35
+
+float calibrationOffset = 1.35;
+
+CodeBLocks
+
+#include <Wire.h>
+#include <Adafruit_MLX90614.h>
+
+#define SDA_PIN 21
+#define SCL_PIN 22
+
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+
+// User calibration value
+float offset = 0.9;
+
+// Rolling buffer for moving average
+const int SAMPLE_SIZE = 15;
+float buffer[SAMPLE_SIZE];
+int indexPos = 0;
+bool filled = false;
+
+// Stabilization detection
+const unsigned long STABLE_TIME = 3000; // 3 seconds
+float lastFilteredTemp = 0.0;
+unsigned long stableStart = 0;
+bool isStable = false;
+
+float getMedian(float arr[], int len) {
+  float temp[len];
+  memcpy(temp, arr, len * sizeof(float));
+  
+  for (int i = 0; i < len - 1; i++) {
+    for (int j = i + 1; j < len; j++) {
+      if (temp[j] < temp[i]) {
+        float swap = temp[i];
+        temp[i] = temp[j];
+        temp[j] = swap;
+      }
+    }
+  }
+  return temp[len / 2];
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  if (!mlx.begin()) {
+    Serial.println("Sensor not detected!");
+    while (true);
+  }
+
+  Serial.println("MLX90614 Stabilized Mode Ready");
+}
+
+void loop() {
+  float raw = mlx.readObjectTempC();
+
+  // Reject impossible values
+  if (raw < 30 || raw > 43 || isnan(raw)) return;
+
+  // Fill rolling buffer
+  buffer[indexPos] = raw;
+  indexPos++;
+  if (indexPos >= SAMPLE_SIZE) {
+    indexPos = 0;
+    filled = true;
+  }
+
+  // Apply median + moving average filtering
+  float filtered = raw;
+  if (filled) {
+    filtered = getMedian(buffer, SAMPLE_SIZE);
+
+    float sum = 0;
+    for (int i = 0; i < SAMPLE_SIZE; i++) {
+      sum += buffer[i];
+    }
+    filtered = sum / SAMPLE_SIZE;
+  }
+
+  float corrected = filtered + offset;
+
+  // Check for stability
+  if (abs(corrected - lastFilteredTemp) < 0.05) { // temperature stable within 0.05°C
+    if (!isStable) {
+      stableStart = millis();
+      isStable = true;
+    } else if (millis() - stableStart >= STABLE_TIME) {
+      Serial.println("===================================");
+      Serial.print("🌡 Final Stable Temperature: ");
+      Serial.print(corrected);
+      Serial.println(" °C");
+      Serial.println("===================================");
+      delay(3000); // Pause before next measurement
+      isStable = false; // Reset to detect next person
+    }
+  } else {
+    isStable = false;
+  }
+
+  lastFilteredTemp = corrected;
+
+  // Optional: print live readings while stabilizing
+  Serial.print("Raw: ");
+  Serial.print(raw);
+  Serial.print("  Filtered: ");
+  Serial.print(filtered);
+  Serial.print("  Corrected: ");
+  Serial.println(corrected);
+
+  delay(150);
+}

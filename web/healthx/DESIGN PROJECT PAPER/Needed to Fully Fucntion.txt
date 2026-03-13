@@ -1,0 +1,11 @@
+System needed to be fully functional;
+
+Weight Tare Scale Button;
+
+SPO2 Checking;
+
+Heart Rate checking if functional;
+
+Body Temp Testing and Checking in other Body Temp Sensor;
+
+BLood Pressure Calibration;
